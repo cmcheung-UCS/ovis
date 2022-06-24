@@ -284,9 +284,9 @@ static ldms_set_t get_set(struct ldmsd_sampler *self) {
 }
 
 /**
- *
+ * LDMS calls this function to sample GPU metrics and store them in the metrics set.
  * @param self
- * @return
+ * @return 0 if successful; otherwise returns EINVAL.
  */
 static int sample(struct ldmsd_sampler *self) {
     if (!set) {

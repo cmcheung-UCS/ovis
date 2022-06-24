@@ -84,8 +84,8 @@ void constructMetricName(const char *szBaseMetricName, uint8_t deviceId, char *s
 }
 
 /**
- *
- * @param schema This is a pointer type.
+ * Populates the GPU metric schema.  This is analogous to an SQL CREATE TABLE.
+ * @param schema This is a schema pointer.
  * @param numDevices Number of GPU devices.
  * @return >= The index of the last metric index added.
  *         <0 Insufficient resources or duplicate name.
@@ -169,6 +169,13 @@ void setU8Array(ldms_set_t s, int metricId, ze_device_handle_t hDevice,
     }
 }
 
+/**
+ * Populates the GPU metrics set.  This is analogous to a row in an SQL table.
+ * @param phDevices device handle.
+ * @param numDevices Number of GPU devices.
+ * @param s Metrics set.
+ * @param firstGpuMetricId Index to first GPU metric.
+ */
 void populateMetricSet(ze_device_handle_t *phDevices, uint32_t numDevices, ldms_set_t s, int firstGpuMetricId) {
     int metricId = firstGpuMetricId;
 

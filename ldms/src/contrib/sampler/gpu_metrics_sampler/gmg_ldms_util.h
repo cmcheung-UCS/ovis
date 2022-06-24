@@ -82,16 +82,24 @@ extern const size_t c_numMetrics;
  */
 
 /**
- * Populate the GPU metric schema.  This is analogous to an SQL CREATE TABLE.
- * @param schema
- * @param numDevices
- * @return
+ * Populates the GPU metric schema.  This is analogous to an SQL CREATE TABLE.
+ * @param schema This is a schema pointer.
+ * @param numDevices Number of GPU devices.
+ * @return >= The index of the last metric index added.
+ *         <0 Insufficient resources or duplicate name.
  */
 int populateMetricSchema(
         ldms_schema_t schema,
         uint32_t numDevices
 );
 
+/**
+ * Populates the GPU metrics set.  This is analogous to a row in an SQL table.
+ * @param phDevices device handle.
+ * @param numDevices Number of GPU devices.
+ * @param s Metrics set.
+ * @param firstGpuMetricId Index to first GPU metric.
+ */
 void populateMetricSet(
         ze_device_handle_t *phDevices,
         uint32_t numDevices,
