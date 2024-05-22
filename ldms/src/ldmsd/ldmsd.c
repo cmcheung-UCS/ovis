@@ -96,7 +96,7 @@
 #define LDMSD_LOGFILE "/var/log/ldmsd.log"
 #define LDMSD_PIDFILE_FMT "/var/run/%s.pid"
 
-const char *short_opts = "B:l:s:x:P:m:Fkr:v:Vc:u:a:A:n:t";
+const char *short_opts = "B:l:s:x:P:m:Fkr:v:Vc:u:a:A:n:tL:";
 
 struct option long_opts[] = {
 	{ "default_auth_args",     required_argument, 0,  'A' },
@@ -110,6 +110,7 @@ struct option long_opts[] = {
 	{ "pid_file",              required_argument, 0,  'r' },
 	{ "kernel_file",           required_argument, 0,  's' },
 	{ "log_level",             required_argument, 0,  'v' },
+	{ "log_config",            required_argument, 0,  'L' },
 	{ 0,                       0,                 0,  0 }
 };
 
@@ -368,9 +369,9 @@ void __ldmsd_log(enum ldmsd_loglevel level, const char *fmt, va_list ap)
 	if (!ldmsd_is_initialized()) {
 		/* No workers, so directly log to the file */
 		(void) __log(level, msg, &tv, &tm);
+		free(msg);
 		return;
 	}
-
 	log_ev = ev_new(log_type);
 	if (!log_ev)
 		return;
@@ -459,13 +460,6 @@ void ldmsd_inband_cfg_mask_rm(mode_t mask)
 {
 	inband_cfg_mask &= ~mask;
 }
-
-#ifdef LDMSD_UPDATE_TIME
-double ldmsd_timeval_diff(struct timeval *start, struct timeval *end)
-{
-	return (end->tv_sec-start->tv_sec)*1000000.0 + (end->tv_usec-start->tv_usec);
-}
-#endif /* LDMSD_UPDATE_TIME */
 
 extern void ldmsd_strgp_close();
 
@@ -623,6 +617,7 @@ void usage_hint(char *argv[],char *hint)
 	       "                                                  are DEBUG, INFO, ERROR, CRITICAL and QUIET.\n"
 	       "                                                  The default level is ERROR.\n");
 	printf("    -t,          --log_truncate                   Truncate the log file at start if the log file exists.\n");
+	printf("    -L optlog, --log_config optlog                Log config commands; optlog is INT:PATH\n");
 	printf("  Communication Options\n");
 	printf("    -x xprt:port:host\n"
 	       "                                                  Specifies the transport type to listen on. May be specified\n"
@@ -1173,14 +1168,14 @@ char *ldmsd_set_info_origin_enum2str(enum ldmsd_set_origin_type type)
 		return "";
 }
 
-void __transaction_end_time_get(struct timeval *start, struct timeval *dur,
-							struct timeval *end__)
+void __transaction_end_time_get(struct timespec *start, struct timespec *dur,
+							struct timespec *end__)
 {
 	end__->tv_sec = start->tv_sec + dur->tv_sec;
-	end__->tv_usec = start->tv_usec + dur->tv_usec;
-	if (end__->tv_usec > 1000000) {
+	end__->tv_nsec = start->tv_nsec + dur->tv_nsec;
+	if (end__->tv_nsec > 1000000000) {
 		end__->tv_sec += 1;
-		end__->tv_usec -= 1000000;
+		end__->tv_nsec -= 1000000000;
 	}
 }
 
@@ -1193,7 +1188,7 @@ ldmsd_set_info_t ldmsd_set_info_get(const char *inst_name)
 {
 	ldmsd_set_info_t info;
 	struct ldms_timestamp t;
-	struct timeval dur;
+	struct timespec dur;
 	struct ldmsd_plugin_set_list *plugn_set_list;
 	struct ldmsd_plugin_set *plugn_set = NULL;
 	struct ldmsd_plugin_cfg *pi;
@@ -1240,14 +1235,14 @@ ldmsd_set_info_t ldmsd_set_info_get(const char *inst_name)
 
 		t = ldms_transaction_timestamp_get(lset);
 		info->start.tv_sec = (long int)t.sec;
-		info->start.tv_usec = (long int)t.usec;
+		info->start.tv_nsec = (long int)t.usec * 1000;
 		if (!ldms_set_is_consistent(lset)) {
 			info->end.tv_sec = 0;
-			info->end.tv_usec = 0;
+			info->end.tv_nsec = 0;
 		} else {
 			t = ldms_transaction_duration_get(lset);
 			dur.tv_sec = (long int)t.sec;
-			dur.tv_usec = (long int)t.usec;
+			dur.tv_nsec = (long int)t.usec * 1000;
 			__transaction_end_time_get(&info->start,
 					&dur, &info->end);
 		}
@@ -1276,12 +1271,12 @@ ldmsd_set_info_t ldmsd_set_info_get(const char *inst_name)
 			info->interval_us = prd_set->updt_interval;
 			info->offset_us = prd_set->updt_offset;
 			info->sync = prd_set->updt_sync;
-			info->start = prd_set->updt_start;
+			info->start = prd_set->updt_stat.start;
 			if (prd_set->state == LDMSD_PRDCR_SET_STATE_UPDATING) {
 				info->end.tv_sec = 0;
-				info->end.tv_usec = 0;
+				info->end.tv_nsec = 0;
 			} else {
-				info->end = prd_set->updt_end;
+				info->end = prd_set->updt_stat.end;
 			}
 			goto out;
 		}
@@ -1751,7 +1746,8 @@ int ldmsd_listen_start(ldmsd_listen_t listen)
 			  "'%s' transport creation with auth '%s' "
 			  "failed, error: %s(%d). args='%s'. Please check transport "
 			  "configuration, authentication configuration, "
-			  "ZAP_LIBPATH (env var), and LD_LIBRARY_PATH.\n",
+			  "ZAP_LIBPATH (env var), and LD_LIBRARY_PATH. "
+			  "If using Munge, please check the Munge daemon.\n",
 			  listen->xprt,
 			  listen->auth_name,
 			  ovis_errno_abbvr(rc),
@@ -1813,6 +1809,103 @@ void ldmsd_str_list_destroy(struct ldmsd_str_list *list)
 	}
 }
 
+/* if path is NULL, close file.
+ * if path is not NULL, open the file.
+ */
+static int reset_log_config_file(const char *path)
+{
+	if (path) {
+		reset_log_config_file(NULL);
+		ldmsd_req_debug_file = fopen(path, "a");
+		if (ldmsd_req_debug_file) {
+			struct tm tm;
+			time_t t;
+			gettimeofday(&ldmsd_req_last_time, NULL);
+			t = time(NULL);
+			localtime_r(&t, &tm);
+			int e = 0, fe;
+			fe = fprintf(ldmsd_req_debug_file, "# log begin:");
+			if (fe < 0)
+				e |= fe;
+			fprintf(ldmsd_req_debug_file, " %lu.%06lu: ",
+					ldmsd_req_last_time.tv_sec,
+					ldmsd_req_last_time.tv_usec);
+			char dtsz[200];
+			strftime(dtsz, sizeof(dtsz), "%a %b %d %H:%M:%S %Y",
+				&tm);
+			fe = fprintf(ldmsd_req_debug_file, " %s", dtsz);
+			if (fe < 0)
+				e |= fe;
+			fe |= fprintf(ldmsd_req_debug_file, "\n");
+			if (fe < 0)
+				e |= fe;
+			e |= fflush(ldmsd_req_debug_file);
+			if (e) {
+				ldmsd_req_debug = 0;
+				fclose(ldmsd_req_debug_file);
+				return EBADFD;
+			}
+			return 0;
+		}
+		return errno;
+	}
+	if (ldmsd_req_debug_file) {
+		fprintf(ldmsd_req_debug_file,"# log end\n");
+		fclose(ldmsd_req_debug_file);
+		ldmsd_req_debug_file = NULL;
+	}
+	return 0;
+}
+/* if value is integer, convert to bits and log to regular log.
+ * if value is a path, set log_config file to path and assume int=1.
+ * if value is int:path, log to path per 0-LRD_ALL
+ * numbers out of range mean silence is desired.
+ * if value is null, it's a recursive call to set default log and req messages.
+ */
+static int process_log_config(char *value)
+{
+	if (!value) {
+		ldmsd_req_debug = 1;
+		reset_log_config_file(NULL);
+		return 0;
+	}
+	if (value[0] == '-') {
+		ldmsd_log(LDMSD_LERROR,
+			"-L option is missing an argument. Found %s\n", value);
+		return EINVAL;
+	}
+	int on_off = 0;
+	char *path = strdup(value);
+	int argc = sscanf(value, "%d:%s", &on_off, path);
+	switch (argc) {
+	case 0: /* no int: found value is path */
+		ldmsd_req_debug = 1;
+		free(path);
+		return reset_log_config_file(value);
+	case 1: /* int only found */
+		reset_log_config_file(NULL);
+		break;
+	case 2: /* both */
+		reset_log_config_file(path);
+		break;
+	default:
+		free(path);
+		ldmsd_log(LDMSD_LERROR,
+			"-L expected CINT:/path Found %s\n", value);
+		return EINVAL;
+	}
+	if (on_off > 0 && on_off <= LRD_ALL)
+		ldmsd_req_debug = on_off;
+	else {
+		ldmsd_req_debug = 0;
+		ldmsd_log(LDMSD_LERROR,
+			"-L expected CINT <= %d. Got %d\n", LRD_ALL, on_off);
+		free(path);
+		return EINVAL;
+	}
+	free(path);
+	return 0;
+}
 /*
  * \return EPERM if the value is already given.
  *
@@ -1869,6 +1962,8 @@ int ldmsd_process_cmd_line_arg(char opt, char *value)
 			}
 		}
 		break;
+	case 'L':
+		 return process_log_config(value);
 	case 's':
 		if (check_arg("s", value, LO_PATH))
 			return EINVAL;

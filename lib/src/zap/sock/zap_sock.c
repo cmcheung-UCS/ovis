@@ -568,7 +568,6 @@ static void process_sep_msg_ack_accepted(struct z_sock_ep *sep)
 		.type = ZAP_EVENT_CONNECTED,
 		.status = ZAP_ERR_OK,
 	};
-	ref_get(&sep->ep.ref, "accept/connect"); /* Release when receive disconnect/error event. */
 	sep->ep.cb(&sep->ep, &ev);
 }
 
@@ -1257,6 +1256,9 @@ static void sock_write(struct epoll_event *ev)
 	assert(0 == wr->data_len);
 	assert(0 == wr->msg_len);
 	TAILQ_REMOVE(&sep->sq, wr, link);
+	if (sep->ep.thread)
+		__atomic_fetch_sub(&sep->ep.thread->stat->sq_sz, 1, __ATOMIC_SEQ_CST);
+	__atomic_fetch_sub(&sep->ep.sq_sz, 1, __ATOMIC_SEQ_CST);
 	if (wr->flags & Z_SOCK_WR_COMPLETION) {
 		/* right now we have only SEND_COMPLETE delivering by WR */
 		assert(ntohs(wr->msg.hdr.msg_type) == SOCK_MSG_SENDRECV);
@@ -1324,8 +1326,20 @@ static void sock_read(struct epoll_event *ev)
 			/* good */
 			break;
 		case ZAP_EP_CLOSE:
-			/* shutdown is called already. No need to shut it down agian. */
-			ZAP_ASSERT(0, &(sep->ep), "%s bad ep state (ZAP_EP_CLOSE)", __func__);
+			/*
+			 * We can arrive in this case when
+			 * the EPOLLIN events arrived between
+			 * the endpoint state moving to ZAP_EP_CLOSE and
+			 * the connection shutdown. Thus, we should not call
+			 * assert() here.
+			 *
+			 * The ZAP_EP_CLOSE state does not distinguish
+			 * before and after Zap has delivered the DISCONNECTED
+			 * event to the application. We do not process
+			 * the EPOLLIN events to be on the safe side if
+			 * Zap has delivered the DISCONNECTED event already
+			 * and we arrived here unexpectedly.
+			 */
 			return;
 		case ZAP_EP_INIT:
 			/* No connection. Impossible to reach this. */
@@ -1473,6 +1487,9 @@ static void __wr_post(struct z_sock_ep *sep, z_sock_send_wr_t wr)
 {
 	struct epoll_event ev = { .events = EPOLLOUT, .data.ptr = sep };
 	TAILQ_INSERT_TAIL(&sep->sq, wr, link);
+	__atomic_fetch_add(&sep->ep.sq_sz, 1, __ATOMIC_SEQ_CST);
+	if (sep->ep.thread)
+		__atomic_fetch_add(&sep->ep.thread->stat->sq_sz, 1, __ATOMIC_SEQ_CST);
 	sock_write(&ev);
 }
 
@@ -1567,6 +1584,7 @@ static void sock_event(struct epoll_event *ev)
 			zev.type = ZAP_EVENT_CONNECT_ERROR;
 			do_cb = 1;
 		}
+		drop_conn_ref = 1;
 		break;
 	case ZAP_EP_CONNECTING:
 		zev.type = ZAP_EVENT_CONNECT_ERROR;
@@ -1581,6 +1599,7 @@ static void sock_event(struct epoll_event *ev)
 		break;
 	case ZAP_EP_ERROR:
 		do_cb = 0;
+		drop_conn_ref = 1;
 		break;
 	default:
 		LOG_(sep, "Unexpected state for EOF %d.\n",
@@ -1642,6 +1661,7 @@ static void __z_sock_conn_request(struct epoll_event *ev)
 	new_sep->ev.data.ptr = new_sep;
 	new_sep->ev.events = EPOLLIN;
 
+	ref_get(&new_sep->ep.ref, "accept/connect"); /* Release when receive disconnect/error event. */
 	rc = __set_sock_opts(new_sep);
 	if (rc)
 		goto err_1;

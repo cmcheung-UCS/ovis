@@ -112,6 +112,23 @@ static struct {
 } ldms_zap_tbl[16] = {{0}};
 static int ldms_zap_tbl_n = 0;
 
+static char *xprt_event_type_names[] = {
+	[LDMS_XPRT_EVENT_CONNECTED] = "CONNECTED",
+	[LDMS_XPRT_EVENT_REJECTED] = "REJECTED",
+	[LDMS_XPRT_EVENT_ERROR] = "ERROR",
+	[LDMS_XPRT_EVENT_DISCONNECTED] = "DISCONNECTED",
+	[LDMS_XPRT_EVENT_RECV] = "RECV",
+	[LDMS_XPRT_EVENT_SET_DELETE] = "SET_DELETE",
+	[LDMS_XPRT_EVENT_SEND_COMPLETE] = "SEND_COMPLETE",
+};
+
+const char *ldms_xprt_event_type_to_str(enum ldms_xprt_event_type t)
+{
+	if (t > LDMS_XPRT_EVENT_LAST)
+		return "INVALID";
+	return xprt_event_type_names[t];
+}
+
 void ldms_xprt_set_delete(ldms_t x, struct ldms_set *s, ldms_set_delete_cb_t cb_fn);
 
 ldms_t ldms_xprt_get(ldms_t x)
@@ -125,11 +142,12 @@ ldms_t ldms_xprt_get(ldms_t x)
 	return x;
 }
 
-static int ldms_xprt_connected(struct ldms_xprt *x)
+int ldms_xprt_connected(struct ldms_xprt *x)
 {
 	assert(x && x->ref_count);
 	return (x->disconnected == 0 && x->zap_ep && zap_ep_connected(x->zap_ep));
 }
+
 LIST_HEAD(xprt_list, ldms_xprt) xprt_list;
 ldms_t ldms_xprt_first()
 {
@@ -800,9 +818,11 @@ static void process_dir_request(struct ldms_xprt *x, struct ldms_request *req)
 
 		if (0 == ldms_access_check(x, LDMS_ACCESS_READ, uid, gid, perm)) {
 			/* no access, skip it */
+			pthread_mutex_lock(&set->lock);
 			cnt += __ldms_format_set_meta_as_json(set, last_cnt,
 						      &reply->dir.json_data[cnt],
 						      len - hdrlen - cnt - 3 /* ]}\0 */);
+			pthread_mutex_unlock(&set->lock);
 		}
 
 		if (/* Too big to fit in transport message, send what we have */
@@ -2887,8 +2907,12 @@ static void ldms_zap_cb(zap_ep_t zep, zap_event_t ev)
 		ldms_xprt_put(x);
 		break;
 	case ZAP_EVENT_SEND_COMPLETE:
-		if (!(x->auth_flag & LDMS_XPRT_AUTH_APPROVED)) {
-			/* Ignore */
+		if (x->auth_flag != LDMS_XPRT_AUTH_APPROVED) {
+			/*
+			 * Do not forward the send_complete to applications
+			 * if the authentication is not approved.
+			 * Applications know only the connection is connecting.
+			 */
 		} else {
 			event.type = LDMS_XPRT_EVENT_SEND_COMPLETE;
 			if (x->event_cb)
@@ -3464,6 +3488,11 @@ void ldms_xprt_set_delete(ldms_t x, struct ldms_set *s, ldms_set_delete_cb_t cb_
 	struct xprt_set_coll_entry *ent;
 
 	pthread_mutex_lock(&x->lock);
+	if (!ldms_xprt_connected(x)) {
+		pthread_mutex_unlock(&x->lock);
+		return;
+	}
+
 	ctxt = __ldms_alloc_ctxt
 		(x,
 		 sizeof(struct ldms_request) + sizeof(struct ldms_context),

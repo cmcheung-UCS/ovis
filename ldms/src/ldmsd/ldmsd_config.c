@@ -684,8 +684,11 @@ parse:
 	if (req_filter) {
 		rc = req_filter(&xprt, request, ctxt);
 		/* rc = 0, filter OK */
-		if (rc == 0)
+		if (rc == 0) {
+			__dlog(DLOG_CFGOK, "# deferring line %d (%s): %s\n",
+				lineno, path, line);
 			goto next_req;
+		}
 		/* rc == errno */
 		if (rc > 0) {
 			ldmsd_log(LDMSD_LERROR,
@@ -851,6 +854,8 @@ int ldmsd_cfgobjs_start(int (*filter)(ldmsd_cfgobj_t))
 			ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR);
 			goto out;
 		}
+		__dlog(DLOG_CFGOK, "prdcr_start name=%s interval=%ld # delay\n",
+			obj->name, ((ldmsd_prdcr_t)obj)->conn_intrvl_us);
 	}
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_PRDCR);
 
@@ -866,6 +871,12 @@ int ldmsd_cfgobjs_start(int (*filter)(ldmsd_cfgobj_t))
 			ldmsd_cfg_unlock(LDMSD_CFGOBJ_UPDTR);
 			goto out;
 		}
+		__dlog(DLOG_CFGOK, "updtr_start name=%s interval=%ld"
+			" offset=%ld auto_interval=%d # delayed\n",
+			obj->name,
+			((ldmsd_updtr_t)obj)->default_task.sched.intrvl_us,
+			((ldmsd_updtr_t)obj)->default_task.sched.offset_us,
+			((ldmsd_updtr_t)obj)->is_auto_task);
 	}
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_UPDTR);
 
@@ -881,6 +892,8 @@ int ldmsd_cfgobjs_start(int (*filter)(ldmsd_cfgobj_t))
 			ldmsd_cfg_unlock(LDMSD_CFGOBJ_STRGP);
 			goto out;
 		}
+                __dlog(DLOG_CFGOK, "strgp_start name=%s # delayed \n",
+                        obj->name);
 	}
 	ldmsd_cfg_unlock(LDMSD_CFGOBJ_STRGP);
 

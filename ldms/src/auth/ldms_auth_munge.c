@@ -99,6 +99,7 @@ ldms_auth_t __auth_munge_new(ldms_auth_plugin_t plugin,
 	struct ldms_auth_munge *a;
 	munge_ctx_t mctx;
 	munge_err_t merr;
+	char *test_cred;
 
 	a = calloc(1, sizeof(*a));
 	if (!a)
@@ -114,6 +115,12 @@ ldms_auth_t __auth_munge_new(ldms_auth_plugin_t plugin,
 		if (merr != EMUNGE_SUCCESS)
 			goto err2;
 	}
+
+	/* Test munge connection */
+	merr = munge_encode(&test_cred, mctx, NULL, 0);
+	if (merr != EMUNGE_SUCCESS)
+		goto err2;
+	free(test_cred);
 
 	a->mctx = mctx;
 	return &a->base;

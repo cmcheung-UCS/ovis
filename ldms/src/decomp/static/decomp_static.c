@@ -56,7 +56,7 @@
 #include <assert.h>
 #include <errno.h>
 
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include "ovis_json/ovis_json.h"
 #include "coll/rbt.h"
@@ -434,13 +434,18 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
 	int i, j, k, rc;
 	struct str_int_tbl_s *col_id_tbl = NULL;
 	struct str_int_s key, *tbl_ent;
-	SHA256_CTX sha_ctxt;
+	EVP_MD_CTX *evp_ctx = NULL;
 
 	jrows = __jdict_list(jcfg, "rows");
 	if (!jrows) {
 		DECOMP_ERR(reqc, errno, "strgp '%s': The 'rows' attribute is missing, "
 						     "or its value is not a list.\n",
 						     strgp->obj.name);
+		goto err_0;
+	}
+	evp_ctx = EVP_MD_CTX_create();
+	if (!evp_ctx) {
+		DECOMP_ERR(reqc, errno, "out of memory\n");
 		goto err_0;
 	}
 	dcfg = calloc(1, sizeof(*dcfg) + jrows->item_count*sizeof(dcfg->rows[0]));
@@ -462,7 +467,7 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
 
 		drow = &dcfg->rows[i];
 		drow->row_sz = sizeof(struct ldmsd_row_s);
-		SHA256_Init(&sha_ctxt);
+		EVP_DigestInit_ex(evp_ctx, EVP_sha256(), NULL);
 		rbt_init(&drow->mid_rbt, __mid_rbn_cmp);
 
 		/* schema name */
@@ -546,8 +551,8 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
 				goto err_0;
 			}
 			/* update row schema digest */
-			SHA256_Update(&sha_ctxt, dcol->dst, strlen(dcol->dst));
-			SHA256_Update(&sha_ctxt, &dcol->type, sizeof(dcol->type));
+			EVP_DigestUpdate(evp_ctx, dcol->dst, strlen(dcol->dst));
+			EVP_DigestUpdate(evp_ctx, &dcol->type, sizeof(dcol->type));
 			if (!ldms_type_is_array(dcol->type))
 				goto not_array_fill;
 			/* array routine */
@@ -633,7 +638,8 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
 		assert(j == jcols->item_count);
 
 		/* Finalize row schema digest */
-		SHA256_Final(drow->schema_digest.digest, &sha_ctxt);
+		unsigned int len = LDMS_DIGEST_LENGTH;
+		EVP_DigestFinal(evp_ctx, drow->schema_digest.digest, &len);
 
 		/* indices */
 		jidxs = __jdict_list(jrow, "indices");
@@ -723,6 +729,8 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
 		i++;
 	}
 	assert(i == jrows->item_count);
+	if (evp_ctx)
+		EVP_MD_CTX_destroy(evp_ctx);
 	return &dcfg->decomp;
 
  err_enomem:
@@ -730,6 +738,8 @@ __decomp_static_config( ldmsd_strgp_t strgp, json_entity_t jcfg,
  err_0:
 	__decomp_static_cfg_free(dcfg);
 	free(col_id_tbl);
+	if (evp_ctx)
+		EVP_MD_CTX_destroy(evp_ctx);
 	return NULL;
 }
 
@@ -953,13 +963,12 @@ static int __decomp_static_decompose(ldmsd_strgp_t strgp, ldms_set_t set,
 			mval = ldms_metric_get(set, mid);
 			mtype = ldms_metric_type_get(set, mid);
 			if (mtype != mid_rbn->col_mids[j].mtype) {
-				ldmsd_lerror("strgp '%s': row '%d' col[dst] '%s': "
-					     "the value type (%s) is not "
-					     "compatible with the source metric type (%s). "
-					     "Please check the decomposition configuration.\n",
-					     strgp->obj.name, i, dcol->dst,
-					     ldms_metric_type_to_str(dcol->type),
-					     ldms_metric_type_to_str(mcol->mtype));
+				ldmsd_lerror("strgp '%s': the metric type (%s) of "
+					     "row %d:col %d is different from the type (%s) of "
+					     "LDMS metric '%s'.\n", strgp->obj.name,
+					     ldms_metric_type_to_str(mid_rbn->col_mids[j].mtype),
+					     i, j, ldms_metric_type_to_str(mtype),
+					     ldms_metric_name_get(set, mid));
 				rc = EINVAL;
 				goto err_0;
 			}

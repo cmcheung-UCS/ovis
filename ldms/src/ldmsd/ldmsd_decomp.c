@@ -199,6 +199,12 @@ static ldmsd_decomp_t __decomp_get(const char *decomp, ldmsd_req_ctxt_t reqc)
 	return dc;
 }
 
+/* Export so that decomp_flex can call, but don't advertise this in ldmsd.h */
+ldmsd_decomp_t ldmsd_decomp_get(const char *decomp, ldmsd_req_ctxt_t reqc)
+{
+	return __decomp_get(decomp, reqc);
+}
+
 /* protected by strgp lock */
 int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ctxt_t reqc)
 {
@@ -210,6 +216,13 @@ int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ct
 	json_parser_t jp = NULL;
 	char *buff = NULL;
 	ldmsd_decomp_t decomp_api;
+
+	if (strgp->decomp) {
+		/* already configured */
+		rc = EALREADY;
+		DECOMP_ERR(reqc, EALREADY, "Already configurd\n");
+		goto err_0;
+	}
 
 	/* Load JSON from file */
 	fd = open(json_path, O_RDONLY);
@@ -281,17 +294,11 @@ int ldmsd_decomp_config(ldmsd_strgp_t strgp, const char *json_path, ldmsd_req_ct
 
 	/* let-through, clean-up */
  err_4:
-	#if 1
 	json_entity_free(cfg);
-	#endif
  err_3:
-	#if 1
 	json_parser_free(jp);
-	#endif
  err_2:
-	#if 1
 	free(buff);
-	#endif
  err_1:
 	close(fd);
  err_0:

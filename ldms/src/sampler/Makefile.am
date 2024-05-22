@@ -35,13 +35,22 @@ endif
 SUBDIRS += lustre_client
 SUBDIRS += lustre_mdt
 SUBDIRS += lustre_ost
+SUBDIRS += lustre_mdc
 
 if HAVE_DCGM
 SUBDIRS += dcgm_sampler
 endif
 
 if ENABLE_IBNET
+if HAVE_LIBIBMAD
+if HAVE_LIBIBUMAD
+if HAVE_LIBOSMCOMP
+if HAVE_COMPLIB_CL_NODENAMEMAP_H
 SUBDIRS += ibnet
+endif
+endif
+endif
+endif
 endif
 
 if ENABLE_RDC
@@ -262,25 +271,30 @@ if ENABLE_DSTAT
 SUBDIRS += dstat
 endif
 
+if ENABLE_INFINIBAND
 if HAVE_LIBIBMAD
 if HAVE_LIBIBUMAD
 if HAVE_IBA_IB_TYPES_H
 SUBDIRS += ibmad_sampler
+SUBDIRS += ibmad_records_sampler
 endif
-
 libsysclassib_la_SOURCES = sysclassib.c
 libsysclassib_la_LIBADD = $(COMMON_LIBADD) $(LTLIBIBMAD) $(LTLIBIBUMAD)
 pkglib_LTLIBRARIES += libsysclassib.la
 endif
 endif
+endif
 
 if ENABLE_OPA2
-OPA2_LIBADD = -libmad -libumad -lpthread
+if HAVE_LIBIBMAD
+if HAVE_LIBIBUMAD
+OPA2_LIBADD = $(LTLIBIBMAD) $(LTLIBIBUMAD) -lpthread
 libopa2_la_SOURCES = opa2.c
-OPAINC=/usr/include/infiniband
-libopa2_la_CFLAGS = $(AM_CFLAGS) -I$(OPAINC)
+libopa2_la_CFLAGS = $(AM_CFLAGS) -I/usr/include/infiniband
 libopa2_la_LIBADD = $(AM_LDFLAGS) $(COMMON_LIBADD) $(OPA2_LIBADD) $(JOBID_LIBFLAGS)
 pkglib_LTLIBRARIES += libopa2.la
+endif
+endif
 endif
 
 if ENABLE_ATASMART
@@ -312,4 +326,11 @@ endif
 
 if ENABLE_BLOB_STREAM
 SUBDIRS += blob_stream
+endif
+
+if ENABLE_SLINGSHOT
+if HAVE_LIBCXI
+SUBDIRS += slingshot_metrics
+SUBDIRS += slingshot_info
+endif
 endif

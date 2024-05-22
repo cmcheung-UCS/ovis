@@ -243,11 +243,27 @@ for rec in _lst:
 
 """
 
-cdef extern void PyEval_InitThreads()
+# Python version < 3.9 Need PyEval_InitThreads() before PyGILState_Ensure(), cb,
+# PyGILState_Release(). 2nd call to this function is a no-op.
+#
+# Since Python 3.9, PyEval_InitThreads() is deprecated. It will be removed in
+# Python 3.11. Hence, the function call is put into the preprocessor wrapper.
+cdef extern from *:
+    # verbatim C directive
+    """
+    void __init_threads()
+    {
+        #if PY_VERSION_HEX < 0x03090000
+        extern void PyEval_InitThreads();
+        PyEval_InitThreads();
+        #else
+        /* no-op */
+        #endif
+    }
+    """
+    cdef void __init_threads()
+__init_threads()
 
-# Need initialization before PyGILState_Ensure(), cb, PyGILState_Release().
-# 2nd call to this function is a no-op.
-PyEval_InitThreads()
 
 def init(int max_sz):
     """init(max_sz) - initialize LDMS with memory pool `max_sz` bytes"""
@@ -2659,7 +2675,7 @@ cdef class Set(object):
     def digest_str(self):
         cdef char buf[LDMS_DIGEST_LENGTH*2+1]
         cdef ldms_digest_t d
-        cdef char *d_str
+        cdef const char *d_str
         d = ldms_set_digest_get(self.rbd)
         if not d:
             return None
@@ -3026,6 +3042,9 @@ cdef class Xprt(object):
         rc = ldms_xprt_connect_by_name(self.xprt, BYTES(host), BYTES(port),
                                        xprt_cb, <void*>self)
         if rc:
+            # synchronously failed, self.xprt is no good. Need to "put" it down.
+            ldms_xprt_put(self.xprt)
+            self.xprt = NULL
             raise ConnectionError(rc, "ldms_xprt_connect_by_name() error: {}" \
                                       .format(ERRNO_SYM(rc)))
         if cb:
@@ -3068,6 +3087,9 @@ cdef class Xprt(object):
         rc = ldms_xprt_listen_by_name(self.xprt, BYTES(host), BYTES(port),
                                       passive_xprt_cb, <void*>self)
         if rc:
+            # synchronously failed, self.xprt is no good. Need to "put" it down.
+            ldms_xprt_put(self.xprt)
+            self.xprt = NULL
             raise ConnectionError(rc, "ldms_xprt_listen_by_name() error: {}" \
                                       .format(ERRNO_SYM(rc)))
 

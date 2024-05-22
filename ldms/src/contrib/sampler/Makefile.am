@@ -15,5 +15,22 @@ endif
 SUBDIRS += $(MAYBE_TUTORIAL_SAMPLER)
 
 
+if ENABLE_GPU_METRICS
+SUBDIRS += gpu_metrics_sampler
+endif
 
+if ENABLE_GEOPM_SAMPLER
+    MAYBE_GEOPM_SAMPLER = geopm_sampler
+endif
+SUBDIRS += $(MAYBE_GEOPM_SAMPLER)
 
+if ENABLE_DAOS_SAMPLER
+    MAYBE_DAOS_SAMPLER = daos
+endif
+SUBDIRS += $(MAYBE_DAOS_SAMPLER)
+
+if HAVE_LIBJANSSON
+if HAVE_LIBVARIORUM
+SUBDIRS += variorum_sampler
+endif
+endif

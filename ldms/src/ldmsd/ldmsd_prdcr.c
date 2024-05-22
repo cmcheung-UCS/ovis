@@ -574,12 +574,15 @@ static void prdcr_connect_cb(ldms_t x, ldms_xprt_event_t e, void *cb_arg)
 	ldmsd_xprt_ctxt_t ctxt;
 	ldmsd_prdcr_t prdcr = cb_arg;
 	ldmsd_prdcr_lock(prdcr);
-	ldmsd_log(LDMSD_LINFO, "%s:%d Producer %s (%s %s:%d) conn_state: %d %s\n",
+	ldmsd_log(LDMSD_LINFO, "%s:%d Producer %s (%s %s:%d:%s)"
+				" conn_state: %d %s event type: %s\n",
 				__func__, __LINE__,
 				prdcr->obj.name, prdcr->xprt_name,
 				prdcr->host_name, (int)prdcr->port_no,
+				prdcr->conn_auth,
 				prdcr->conn_state,
-				conn_state_str(prdcr->conn_state));
+				conn_state_str(prdcr->conn_state),
+				ldms_xprt_event_type_to_str(e->type));
 	switch(e->type) {
 	case LDMS_XPRT_EVENT_DISCONNECTED:
 		x->disconnected = 1;
@@ -925,6 +928,7 @@ int __ldmsd_prdcr_start(ldmsd_prdcr_t prdcr, ldmsd_sec_ctxt_t ctxt)
 	ldmsd_task_start(&prdcr->task, prdcr_task_cb, prdcr,
 			 LDMSD_TASK_F_IMMEDIATE,
 			 prdcr->conn_intrvl_us, 0);
+	ldmsd_log(LDMSD_LINFO, "Starting producer %s\n", prdcr->obj.name);
 out:
 	ldmsd_prdcr_unlock(prdcr);
 	return rc;
@@ -961,6 +965,7 @@ int __ldmsd_prdcr_stop(ldmsd_prdcr_t prdcr, ldmsd_sec_ctxt_t ctxt)
 		rc = EBUSY;
 		goto out;
 	}
+	ldmsd_log(LDMSD_LINFO, "Stopping producer %s\n", prdcr->obj.name);
 	if (prdcr->type == LDMSD_PRDCR_TYPE_LOCAL)
 		prdcr_reset_sets(prdcr);
 	ldmsd_task_stop(&prdcr->task);

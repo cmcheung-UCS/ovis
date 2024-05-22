@@ -463,9 +463,11 @@ class LdmsdCmdParser(cmd.Cmd):
             print("Name         Producer     mode            bytes/sec    msg/sec      total bytes  msg count   ")
             print("-" * 12, "-" * 12, "-" * 15, "-" * 12, "-" * 12, "-" * 12, "-" * 12)
             # print("--------------- -------------- --------------- ----- ----------------- -----------\n")
-            for name,s in streams.items():
-                print(f"{name:12}")
+            for sname,s in streams.items():
+                print(f"{sname:12}")
                 for name,p in s.items():
+                    if sname == "_AGGREGATED_":
+                        p['mode'] = ""
                     print(f"             {name:12} {p['mode']:15} {rate(p['info']):>12} {freq(p['info']):>12} {total_bytes(p['info']):>12} {count(p['info']):>12}")
 
     def complete_prdcr_stream_dir(self, text, line, begidx, endidx):
@@ -793,14 +795,16 @@ class LdmsdCmdParser(cmd.Cmd):
     def do_updtr_status(self, arg):
         """
         Get the statuses of all Updaters.
+
         Parameters:
         [name=]        updater name
+        [Summary]     not show updaters' producers
         """
         resp = self.handle('updtr_status', arg)
         if resp['errcode'] == 0:
             updaters = json.loads(resp['msg'])
-            print("Name             Interval:Offset  Auto   Mode            State")
-            print("---------------- ---------------- ------ --------------- ------------")
+            print("Name             Interval:Offset  Auto   Mode            State        Skipped counter Oversampled counter")
+            print(f"---------------- ---------------- ------ --------------- ------------ {'-'*15} {'-'*19}")
             for updtr in updaters:
                 if 'auto' in updtr:
                     auto = updtr['auto']
@@ -808,16 +812,87 @@ class LdmsdCmdParser(cmd.Cmd):
                     # for backward compatabiliity
                     auto = updtr['????']
                 interval_s = cvt_intrvl_off_to_str(updtr['interval'], updtr['offset'])
-                print("{0:16} {1:16} {2:6} {3:15} {4}".format(
-                    updtr['name'], interval_s,
-                    auto, updtr['mode'], updtr['state']))
-                for prdcr in updtr['producers']:
-                    print("    {0:16} {1:16} {2:12} {3:12} {4:12}".format(
-                        prdcr['name'], prdcr['host'], prdcr['port'],
-                        prdcr['transport'], prdcr['state']))
+                print(f"{updtr['name']:16} {interval_s:16} {auto:6} {updtr['mode']:15} " \
+                      f"{updtr['state']:10} {updtr['outstanding count']:15} " \
+                      f"{updtr['oversampled count']:19}")
+                if 'summary' not in arg:
+                    for prdcr in updtr['producers']:
+                        print("    {0:16} {1:16} {2:12} {3:12} {4:12}".format(
+                            prdcr['name'], prdcr['host'], prdcr['port'],
+                            prdcr['transport'], prdcr['state']))
 
     def complete_updtr_status(self, text, line, begidx, endidx):
         return self.__complete_attr_list('updtr_status', text)
+
+    def __update_time_stats(self, updtr):
+        stats = {'min' : float("inf"),
+                 'max' : 0,
+                 'avg' : 0,
+                 'sum' : 0,
+                 'cnt' : 0,
+                 'min_prdcr' : None,
+                 'max_prdcr' : None,
+                 'producers' : {}
+               }
+
+        for p, prdcr in updtr.items():
+            pstats = { 'min' : float("inf"),
+                       'max' : 0,
+                       'sum' : 0,
+                       'avg' : 0,
+                       'cnt' : 0,
+                       'min_prdset' : None,
+                       'max_prdset' : None,
+                       'sets' : {}
+                    }
+            for s, prdset in prdcr.items():
+                pstats['sets'][s] = {'min' : prdset['min'],
+                                     'max' : prdset['max'],
+                                     'avg' : prdset['avg'],
+                                     'cnt' : prdset['cnt']
+                                    }
+                if pstats['min'] > prdset['min']:
+                    pstats['min'] = prdset['min']
+                    pstats['min_prdset'] = s
+                if pstats['max'] < prdset['max']:
+                    pstats['max'] = prdset['max']
+                    pstats['max_prdset'] = s
+                pstats['avg'] = pstats['avg'] * (pstats['cnt']/(pstats['cnt'] + prdset['cnt']))
+                pstats['avg'] += prdset['avg'] * (prdset['cnt']/(pstats['cnt'] + prdset['cnt']))
+                pstats['cnt'] += prdset['cnt']
+            stats['producers'][p] = pstats
+
+            if stats['min'] > pstats['min']:
+                stats['min'] = pstats['min']
+                stats['min_prdcr'] = p
+            if stats['max'] < pstats['max']:
+                stats['max'] = pstats['max']
+                stats['max_prdcr'] = p
+            stats['avg'] = stats['avg'] * (stats['cnt']/(stats['cnt'] + pstats['cnt']))
+            stats['avg'] += pstats['avg'] * (pstats['cnt']/(stats['cnt'] + pstats['cnt']))
+            stats['cnt'] += pstats['cnt']
+        return stats
+
+    def do_update_time_stats(self, arg):
+        """
+        Get the update time statistics of updaters
+
+        Parameters:
+        [name=]        updater name
+        """
+        resp = self.handle('update_time_stats', arg)
+        if resp['errcode'] != 0:
+            return
+
+        j = json.loads(resp['msg'])
+        print("Updater         Min(usec)       Max(usec)       Average(usec)   Count     ")
+        print(f"{'-'*15} {'-'*15} {'-'*15} {'-'*15} {'-'*10}")
+        for n, updtr in j.items():
+            stats = self.__update_time_stats(updtr)
+            print(f"{n:15} {stats['min']:15.4f} {stats['max']:15.4f} {stats['avg']:15.4f} {stats['cnt']:10}")
+
+    def complete_update_time_stats(self, text, line, begidx, endidx):
+        return self.__complete_attr_list('update_time_stats', text)
 
     def do_strgp_status(self, arg):
         """
@@ -845,6 +920,25 @@ class LdmsdCmdParser(cmd.Cmd):
 
     def complete_strgp_status(self, text, line, begidx, endidx):
         return self.__complete_attr_list('strgp_status', text)
+
+    def do_store_time_stats(self, arg):
+        """
+        Get the store time statistics of a storage policy
+        Parameters:
+            [name=]    a storage policy name
+        """
+        resp = self.handle('store_time_stats', arg)
+        if resp['errcode'] != 0:
+            # self.handle() already reported the error.
+            return
+        j = json.loads(resp['msg'])
+        print("strgp           min(usec)       max(usec)      avg(usec)      Count")
+        print(f"{'-'*15} {'-'*15} {'-'*15} {'-'*15} {'-'*10}")
+        for n, strgp in j.items():
+            print(f"{n:15} {strgp['min']:15.4f} {strgp['max']:15.4f} {strgp['avg']:15.4f} {strgp['cnt']:10}")
+
+    def complete_store_time_stats(self, text, line, begidx, endidx):
+        return self.__complete_attr_list('store_time_stats', text)
 
     def do_plugn_status(self, arg):
         resp = self.handle('plugn_status', None)
@@ -1301,10 +1395,15 @@ class LdmsdCmdParser(cmd.Cmd):
         return self.__complete_attr_list('set_info', text)
 
     def display_thread_stats(self, stats):
-        print(f"{'Name':16} {'Samples':12} {'Sample Rate':12} {'Utilization':12}")
-        print("---------------- ------------ ------------ ------------")
+        print(f"{'Name':16} {'Samples':12} {'Sample Rate':12} " \
+              f"{'Utilization':12} {'Send Queue Size':16} " \
+              f"{'Num of EPs':12}")
+        print("---------------- ------------ ------------ ------------ "\
+              "---------------- ------------")
         for e in stats['entries']:
-            print(f"{e['name']:16} {e['sample_count']:12.0f} {e['sample_rate']:12.2f} {e['utilization'] * 100:12.2f}")
+            print(f"{e['name']:16} {e['sample_count']:12.0f} " \
+                  f"{e['sample_rate']:12.2f} {e['utilization'] * 100:12.2f} " \
+                  f"{e['sq_sz']:16} {e['n_eps']:12}")
 
     def do_thread_stats(self, arg):
         """
@@ -1575,7 +1674,11 @@ class LdmsdCmdParser(cmd.Cmd):
             print("-" * 15, "-" * 15, "-" * 12, "-" * 12, "-" * 12, "-" * 12, "-" * 12, "-" * 12)
             # print("--------------- -------------- --------------- ----- ----------------- -----------\n")
             for name,s in streams.items():
+                if name == "_AGGREGATED_":
+                    s['mode'] = ""
                 print(f"{name:15} {s['mode']:15} {rate(s['info']):>12} {freq(s['info']):>12} {total_bytes(s['info']):>12} {count(s['info']):>12} {first(s['info']):>12} {last(s['info']):>12}")
+                if 'publishers' not in s.keys() or len(s['publishers']) == 0:
+                    continue
                 print("   Producers")
                 for name,p in s['publishers'].items():
                     print(f"                {name:15} {rate(p['info']):>12} {freq(p['info']):>12} {total_bytes(p['info']):>12} {count(p['info']):>12} {first(p['info']):>12} {last(p['info']):>12}")
@@ -1706,13 +1809,16 @@ if __name__ == "__main__":
                                          "To connect to an ldmsd, either give " \
                                          "the socket path of the ldmsd or " \
                                          "give both hostname and inet control port. " \
-                                         "If all are given, the sockname takes the priority.")
-        parser.add_argument('--host',
+                                         "If all are given, the sockname takes the priority.",
+                                         add_help=False)
+        parser.add_argument('-?', '--help', action='help', default='==SUPPRESS==',
+                help='show this help message and exit')
+        parser.add_argument('-h','--host',
                             help = "Hostname of ldmsd to connect to",
                             default = 'localhost')
-        parser.add_argument('--port',
+        parser.add_argument('-p','--port',
                             help = "Inet ctrl listener port of ldmsd")
-        parser.add_argument('--xprt',
+        parser.add_argument('-x','--xprt',
                             help = "LDMS Transport type",
                             choices = ['sock', 'ugni', 'rdma', 'fabric'],
                             default = 'sock')

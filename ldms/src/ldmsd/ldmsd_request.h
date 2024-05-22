@@ -55,7 +55,20 @@
 #ifndef LDMS_SRC_LDMSD_LDMSD_REQUEST_H_
 #define LDMS_SRC_LDMSD_LDMSD_REQUEST_H_
 
+/* bit fields for ldmsd_req_debug */
+#define DLOG_NONE   0x0 /* __dlog is a no-op */
+#define DLOG_DEBUG  0x1 /* write handler debug events to __dlog */
+#define DLOG_CFGOK  0x2 /* write successful config change events to __dlog */
+#define DLOG_QUERY  0x4 /* write status query commands to __dlog */
+#define DLOG_FOVER  0x8 /* write failover messages to __dlog */
+#define DLOG_DELTA  0x10 /* prefix time deltas */
+#define DLOG_EPOCH  0x20 /* prefix epoch timestamps */
+#define LRD_ALL \
+  (DLOG_DEBUG|DLOG_CFGOK|DLOG_QUERY|DLOG_FOVER|DLOG_EPOCH|DLOG_DELTA)
 extern int ldmsd_req_debug;
+extern FILE *ldmsd_req_debug_file;
+extern struct timeval ldmsd_req_last_time;
+extern __attribute__((format(printf, 2, 3))) void __dlog(int match, const char *fmt, ...);
 
 enum ldmsd_request {
 	LDMSD_EXAMPLE_REQ = 0x1,
@@ -81,6 +94,7 @@ enum ldmsd_request {
 	LDMSD_STRGP_PRDCR_DEL_REQ,
 	LDMSD_STRGP_METRIC_ADD_REQ,
 	LDMSD_STRGP_METRIC_DEL_REQ,
+	LDMSD_STORE_TIME_STATS_REQ,
 	LDMSD_UPDTR_ADD_REQ = 0x300,
 	LDMSD_UPDTR_DEL_REQ,
 	LDMSD_UPDTR_START_REQ,
@@ -92,6 +106,7 @@ enum ldmsd_request {
 	LDMSD_UPDTR_MATCH_DEL_REQ,
 	LDMSD_UPDTR_TASK_REQ,
 	LDMSD_UPDTR_MATCH_LIST_REQ,
+	LDMSD_UPDATE_TIME_STATS_REQ,
 	LDMSD_SMPLR_ADD_REQ = 0X400,
 	LDMSD_SMPLR_DEL_REQ,
 	LDMSD_SMPLR_START_REQ,

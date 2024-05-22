@@ -60,6 +60,14 @@
 #include "ldms_xprt.h"
 #include "config.h"
 
+/* a - b */
+static inline double ts_diff_usec(struct timespec *a, struct timespec *b)
+{
+	double aa = a->tv_sec*1e9 + a->tv_nsec;
+	double bb = b->tv_sec*1e9 + b->tv_nsec;
+	return (aa - bb)/1e3; /* make it usec */
+}
+
 void ldmsd_updtr___del(ldmsd_cfgobj_t obj)
 {
 	ldmsd_updtr_t updtr = (ldmsd_updtr_t)obj;
@@ -94,7 +102,7 @@ static int updtr_sched_offset_skew_get()
 	return skew;
 }
 
-static ldmsd_prdcr_ref_t updtr_prdcr_ref_first(ldmsd_updtr_t updtr)
+ldmsd_prdcr_ref_t updtr_prdcr_ref_first(ldmsd_updtr_t updtr)
 {
 	struct rbn *rbn = rbt_min(&updtr->prdcr_tree);
 	if (!rbn)
@@ -102,36 +110,13 @@ static ldmsd_prdcr_ref_t updtr_prdcr_ref_first(ldmsd_updtr_t updtr)
 	return container_of(rbn, struct ldmsd_prdcr_ref, rbn);
 }
 
-static ldmsd_prdcr_ref_t updtr_prdcr_ref_next(ldmsd_prdcr_ref_t ref)
+ldmsd_prdcr_ref_t updtr_prdcr_ref_next(ldmsd_prdcr_ref_t ref)
 {
 	struct rbn *rbn = rbn_succ(&ref->rbn);
 	if (!rbn)
 		return NULL;
 	return container_of(rbn, struct ldmsd_prdcr_ref, rbn);
 }
-
-#ifdef LDMSD_UPDATE_TIME
-void __updt_time_get(struct ldmsd_updt_time *updt_time)
-{
-	__sync_fetch_and_add(&updt_time->ref, 1);
-}
-
-void __updt_time_put(struct ldmsd_updt_time *updt_time)
-{
-	if (0 == __sync_sub_and_fetch(&updt_time->ref, 1)) {
-		if (updt_time->update_start.tv_sec != 0) {
-			struct timeval end;
-			gettimeofday(&end, NULL);
-			updt_time->updtr->duration =
-				ldmsd_timeval_diff(&updt_time->update_start,
-						&end);
-		} else {
-			updt_time->updtr->duration = -1;
-		}
-		free(updt_time);
-	}
-}
-#endif /* LDMSD_UDPATE_TIME */
 
 /* Caller must hold the updater lock */
 static ldmsd_updtr_task_t updtr_task_find(ldmsd_updtr_t updtr,
@@ -231,19 +216,35 @@ static void updtr_task_set_reset(ldmsd_updtr_task_t task)
 	task->set_count = 0;
 }
 
+static inline void
+__stats(struct ldmsd_stat *stat, struct timespec *start, struct timespec *end)
+{
+	double dur = ts_diff_usec(end, start);
+
+	stat->count++;
+	if (1 == stat->count) {
+		stat->avg = stat->min = stat->max = dur;
+	} else {
+		stat->avg = (stat->avg * ((stat->count - 1.0)/stat->count)) + (dur/stat->count);
+		if (stat->min > dur)
+			stat->min = dur;
+		else if (stat->max < dur)
+			stat->max = dur;
+	}
+}
+
 static void updtr_update_cb(ldms_t t, ldms_set_t set, int status, void *arg)
 {
-	uint64_t gn;
+	uint64_t gn, push_it = 0;
 	ldmsd_prdcr_set_t prd_set = arg;
 	int errcode;
+	struct timespec start;
+	struct timespec end;
 
 	pthread_mutex_lock(&prd_set->lock);
-	gettimeofday(&prd_set->updt_end, NULL);
-#ifdef LDMSD_UPDATE_TIME
-	prd_set->updt_duration = ldmsd_timeval_diff(&prd_set->updt_start,
-							&prd_set->updt_end);
-	__updt_time_put(prd_set->updt_time);
-#endif /* LDMSD_UPDATE_TIME */
+	clock_gettime(CLOCK_REALTIME, &prd_set->updt_stat.end);
+	__stats(&prd_set->updt_stat, &prd_set->updt_stat.start, &prd_set->updt_stat.end);
+
 	errcode = LDMS_UPD_ERROR(status);
 	ldmsd_log(LDMSD_LDEBUG, "Update complete for Set %s with status %#x\n",
 					prd_set->inst_name, status);
@@ -268,16 +269,21 @@ static void updtr_update_cb(ldms_t t, ldms_set_t set, int status, void *arg)
 	if (prd_set->last_gn == gn) {
 		ldmsd_log(LDMSD_LINFO, "Set %s oversampled %"PRIu64" == %"PRIu64".\n",
 			  prd_set->inst_name, prd_set->last_gn, gn);
+		__atomic_fetch_add(&prd_set->oversampled_cnt, 1, __ATOMIC_SEQ_CST);
 		goto set_ready;
 	}
 	prd_set->last_gn = gn;
+	push_it = 1;
 
 	ldmsd_strgp_ref_t str_ref;
 	LIST_FOREACH(str_ref, &prd_set->strgp_list, entry) {
 		ldmsd_strgp_t strgp = str_ref->strgp;
 
 		ldmsd_strgp_lock(strgp);
+		clock_gettime(CLOCK_REALTIME, &start);
 		strgp->update_fn(strgp, prd_set);
+		clock_gettime(CLOCK_REALTIME, &end);
+		__stats(&strgp->stat, &start, &end);
 		ldmsd_strgp_unlock(strgp);
 	}
 set_ready:
@@ -286,7 +292,7 @@ set_ready:
 		prd_set->state = LDMSD_PRDCR_SET_STATE_READY;
 out:
 	pthread_mutex_unlock(&prd_set->lock);
-	if (0 == errcode) {
+	if (0 == errcode && push_it) {
 		ldmsd_log(LDMSD_LDEBUG, "Pushing set %p %s\n",
 			  prd_set->set, prd_set->inst_name);
 		int rc = ldms_xprt_push(prd_set->set);
@@ -346,12 +352,7 @@ static int schedule_set_updates(ldmsd_prdcr_set_t prd_set, ldmsd_updtr_task_t ta
 	int push_flags = 0;
 	struct str_list_ent_s *ent;
 	LIST_INIT(&ctxt.str_list);
-	gettimeofday(&prd_set->updt_start, NULL);
-#ifdef LDMSD_UPDATE_TIME
-	__updt_time_get(prd_set->updt_time);
-	if (prd_set->updt_time->update_start.tv_sec == 0)
-		prd_set->updt_time->update_start = prd_set->updt_start;
-#endif
+	clock_gettime(CLOCK_REALTIME, &prd_set->updt_stat.start);
 	if (!updtr->push_flags) {
 		op_s = "Updating";
 		prd_set->state = LDMSD_PRDCR_SET_STATE_UPDATING;
@@ -421,9 +422,6 @@ out:
 		free(ent);
 	}
 	if (rc) {
-#ifdef LDMSD_UPDATE_TIME
-		__updt_time_put(prd_set->updt_time);
-#endif
 		ldmsd_log(LDMSD_LINFO, "Synchronous error %d: %s Set %s\n",
 						rc, op_s, prd_set->inst_name);
 		if (!updtr->push_flags)
@@ -587,23 +585,11 @@ out:
 	return;
 }
 
-/* a - b */
-static inline double ts_diff_usec(struct timespec *a, struct timespec *b)
-{
-	double aa = a->tv_sec*1e9 + a->tv_nsec;
-	double bb = b->tv_sec*1e9 + b->tv_nsec;
-	return (aa - bb)/1e3; /* make it usec */
-}
-
 static void schedule_prdcr_updates(ldmsd_updtr_task_t task,
 				   ldmsd_prdcr_t prdcr, ldmsd_name_match_t match)
 {
 	ldmsd_updtr_t updtr = task->updtr;
 	struct timespec ts;
-#ifdef LDMSD_UPDATE_TIME
-	struct timeval start, end;
-	gettimeofday(&start, NULL);
-#endif /* LDMSD_UPDATE_TIME */
 	ldmsd_prdcr_lock(prdcr);
 	if (prdcr->conn_state != LDMSD_PRDCR_STATE_CONNECTED || prdcr->xprt->disconnected)
 		goto out;
@@ -675,6 +661,7 @@ static void schedule_prdcr_updates(ldmsd_updtr_task_t task,
 			ldmsd_log(LDMSD_LINFO, "%s: Set %s: "
 				"there is an outstanding update.\n",
 				__func__, prd_set->inst_name);
+			__atomic_fetch_add(&prd_set->skipped_upd_cnt, 1, __ATOMIC_SEQ_CST);
 		case LDMSD_PRDCR_SET_STATE_DELETED:
 		default:
 			goto next_prd_set;
@@ -690,11 +677,6 @@ next_prd_set:
 	}
 out:
 	ldmsd_prdcr_unlock(prdcr);
-
-#ifdef LDMSD_UPDATE_TIME
-	gettimeofday(&end, NULL);
-	prdcr->sched_update_time = ldmsd_timeval_diff(&start, &end);
-#endif /* LDMSD_UPDATE_tIME */
 }
 
 static void cancel_prdcr_updates(ldmsd_updtr_t updtr,
@@ -734,19 +716,6 @@ static void schedule_updates(ldmsd_updtr_task_t task)
 	ldmsd_updtr_t updtr = task->updtr;
 	ldmsd_name_match_t match;
 
-#ifdef LDMSD_UPDATE_TIME
-	ldmsd_log(LDMSD_LDEBUG, "Updater %s: schedule an update\n",
-						updtr->obj.name);
-	struct timeval start;
-	struct ldmsd_updt_time *updt_time = calloc(1, sizeof(*updt_time));
-	__updt_time_get(updt_time);
-	updt_time->updtr = updtr;
-	updtr->curr_updt_time = updt_time;
-	updtr->duration = -1;
-	updtr->sched_duration = -1;
-	gettimeofday(&start, NULL);
-	updt_time->sched_start = start;
-#endif /* LDMSD_UPDATE_TIME */
 	updtr_task_set_reset(task);
 	if (!LIST_EMPTY(&updtr->match_list)) {
 		LIST_FOREACH(match, &updtr->match_list, entry) {
@@ -761,13 +730,6 @@ static void schedule_updates(ldmsd_updtr_task_t task)
 				ref = updtr_prdcr_ref_next(ref))
 			schedule_prdcr_updates(task, ref->prdcr, NULL);
 	}
-#ifdef LDMSD_UPDATE_TIME
-	struct timeval end;
-	gettimeofday(&end, NULL);
-	updtr->sched_duration = ldmsd_timeval_diff(&start, &end);
-	updtr->curr_updt_time = NULL;
-	__updt_time_put(updt_time);
-#endif /* LDMSD_UPDATE_TIME */
 	if ((!task->is_default) && (0 == task->set_count))
 		updtr_task_stop(task);
 }

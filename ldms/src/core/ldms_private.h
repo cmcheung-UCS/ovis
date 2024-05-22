@@ -52,7 +52,7 @@
 #include <ldms_xprt.h>
 #include <pthread.h>
 #include <zap/zap.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include "ovis_util/os_util.h"
 #include "ovis_ref/ref.h"
 #include "ldms_heap.h"
@@ -85,7 +85,7 @@ STAILQ_HEAD(metric_list_head, ldms_mdef_s);
 struct ldms_schema_s {
 	char *name;
 	struct ldms_digest_s digest;
-	SHA256_CTX sha_ctxt;
+	EVP_MD_CTX *evp_ctx;
 	int card;
 	size_t meta_sz;
 	size_t data_sz;
@@ -181,6 +181,10 @@ extern int __ldms_get_local_set_list(struct ldms_name_list *head);
 extern void __ldms_empty_name_list(struct ldms_name_list *name_list);
 
 extern void __ldms_dir_update(ldms_set_t set, enum ldms_dir_type t);
+/* format set meta info (not metrics) into buf.
+ * \return count of characters added.
+ * NOTE: set->lock mutex must be held before this is called.
+ */
 extern size_t __ldms_format_set_meta_as_json(struct ldms_set *set,
 					     int need_comma,
 					     char *buf, size_t buf_size);

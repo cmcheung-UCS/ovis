@@ -800,6 +800,7 @@ static void __destroy_set_no_lock(void *v)
 		}
 		pthread_mutex_unlock(&x->lock);
 	}
+
 	rbt_del(&__del_tree, &set->del_node);
 	mm_free(set->meta);
 	__ldms_set_info_delete(&set->local_info);
@@ -821,10 +822,6 @@ void ldms_set_delete(ldms_set_t s)
 {
 	ldms_t x;
 	struct ldms_set *__set;
-	struct rbt lookup_coll, push_coll;
-	struct rbn *rbn;
-	struct ldms_push_peer *pp;
-	struct ldms_lookup_peer *lp;
 
 	__ldms_set_tree_lock();
 	__set = __ldms_set_by_id(s->set_id);
@@ -840,42 +837,24 @@ void ldms_set_delete(ldms_set_t s)
 	rbt_del(&__id_tree, &s->id_node);
 	__ldms_set_tree_unlock();
 
-	/* NOTE: We can cut down the entire tree at once because the
-	 *       reader doesn't hold on to the rbn after mutex unlock.
-	 *       In other words, the reader always lock, iterate, then unlock.
+	/* NOTE: We will clean up the push and lookup collections
+	 *       when we destroy the set. While we wait for the
+	 *       SET_DELETE replies from the peers, we iterate
+	 *       through the collections to check if there are any peers
+	 *       that are connected or not.
+	 *
+	 *       If no peers are connected, the set will be destroyed
+	 *       regardless of its reference count. See delete_proc().
 	 */
 	pthread_mutex_lock(&s->lock);
-	push_coll = s->push_coll;
-	s->push_coll.root = NULL;
-	lookup_coll = s->lookup_coll;
-	s->lookup_coll.root = NULL;
 	x = s->xprt;
 	s->xprt = NULL;
 	pthread_mutex_unlock(&s->lock);
 	if (x)
 		ldms_xprt_put(x);
 
-	/* Clean up the push peer collection */
-	while ((rbn = rbt_min(&push_coll))) {
-		rbt_del(&push_coll, rbn);
-		pp = container_of(rbn, struct ldms_push_peer, rbn);
-		ldms_xprt_put(pp->xprt);
-		free(pp);
-	}
-
 	/* Notify downstream transports about the set deletion. */
 	__ldms_dir_del_set(s);
-
-	/*
-	 * Clean up the lookup peer collection and
-	 * remove set from the transport's set collection.
-	 */
-	while ((rbn = rbt_min(&lookup_coll))) {
-		rbt_del(&lookup_coll, rbn);
-		lp = container_of(rbn, struct ldms_lookup_peer, rbn);
-		free(lp);
-	}
-
 
 	/* Add the set to the delete tree with the current timestamp */
 	s->del_time = time(NULL);
@@ -1110,16 +1089,32 @@ int ldms_init(size_t max_size)
 
 ldms_schema_t ldms_schema_new(const char *schema_name)
 {
+	int evp_success;
 	ldms_schema_t s = calloc(1, sizeof *s);
-	if (s) {
-		s->name = strdup(schema_name);
-		SHA256_Init(&s->sha_ctxt);
-		s->meta_sz = sizeof(struct ldms_set_hdr);
-		s->data_sz = sizeof(struct ldms_data_hdr);
-		s->array_card = 1;
-		STAILQ_INIT(&s->metric_list);
-	}
+	if (!s)
+		goto err_0;
+	s->name = strdup(schema_name);
+	if (!s->name)
+		goto err_1;
+	s->evp_ctx = EVP_MD_CTX_create();
+	if (!s->evp_ctx)
+		goto err_2;
+	evp_success = EVP_DigestInit_ex(s->evp_ctx, EVP_sha256(), NULL);
+	if (!evp_success)
+		goto err_3;
+	s->meta_sz = sizeof(struct ldms_set_hdr);
+	s->data_sz = sizeof(struct ldms_data_hdr);
+	s->array_card = 1;
+	STAILQ_INIT(&s->metric_list);
 	return s;
+ err_3:
+	EVP_MD_CTX_destroy(s->evp_ctx);
+ err_2:
+	free(s->name);
+ err_1:
+	free(s);
+ err_0:
+	return NULL;
 }
 
 const char *ldms_digest_str(ldms_digest_t digest, char *buf, int buf_len)
@@ -1137,6 +1132,78 @@ const char *ldms_digest_str(ldms_digest_t digest, char *buf, int buf_len)
 		s += 2;
 	}
 	return buf;
+}
+
+static unsigned char hex_int[] = {
+	['0'] = 0,
+	['1'] = 1,
+	['2'] = 2,
+	['3'] = 3,
+	['4'] = 4,
+	['5'] = 5,
+	['6'] = 6,
+	['7'] = 7,
+	['8'] = 8,
+	['9'] = 9,
+
+	['A'] = 10,
+	['a'] = 10,
+	['B'] = 11,
+	['b'] = 11,
+	['C'] = 12,
+	['c'] = 12,
+	['D'] = 13,
+	['d'] = 13,
+	['E'] = 14,
+	['e'] = 14,
+	['F'] = 15,
+	['f'] = 15,
+
+	[255] = 0,
+};
+
+static unsigned char hex_valid[] = {
+	['0'] = 1,
+	['1'] = 1,
+	['2'] = 1,
+	['3'] = 1,
+	['4'] = 1,
+	['5'] = 1,
+	['6'] = 1,
+	['7'] = 1,
+	['8'] = 1,
+	['9'] = 1,
+
+	['A'] = 1,
+	['a'] = 1,
+	['B'] = 1,
+	['b'] = 1,
+	['C'] = 1,
+	['c'] = 1,
+	['D'] = 1,
+	['d'] = 1,
+	['E'] = 1,
+	['e'] = 1,
+	['F'] = 1,
+	['f'] = 1,
+
+	[255] = 0,
+};
+
+int ldms_str_digest(const char *str, ldms_digest_t digest)
+{
+	int len = strlen(str);
+	unsigned char *d = digest->digest;
+	const unsigned char *c;
+	if (len != 2*sizeof(digest->digest))
+		return EINVAL;
+	for (c = (unsigned char*)str; *c; c += 2) {
+		if (!hex_valid[*c] || !hex_valid[*(c+1)])
+			return EINVAL;
+		*d = (hex_int[*c]<<4) | (hex_int[*(c+1)]);
+		d += 1;
+	}
+	return 0;
 }
 
 int ldms_schema_fprint(ldms_schema_t schema, FILE *fp)
@@ -1215,6 +1282,9 @@ void ldms_schema_delete(ldms_schema_t schema)
 		free(m);
 	}
 	free(schema->name);
+	if (schema->evp_ctx) {
+		EVP_MD_CTX_destroy(schema->evp_ctx);
+	}
 	free(schema);
 }
 
@@ -1342,15 +1412,17 @@ static size_t compute_set_sizes(const char *instance_name, ldms_schema_t schema,
 				int *set_array_card,
 				size_t *meta_sz, size_t *array_data_sz, size_t *heap_sz)
 {
-	*heap_sz = 0;
 	ldms_mdef_t md;
+	size_t _hsz = 0;
 	STAILQ_FOREACH(md, &schema->metric_list, entry) {
 		if (md->type == LDMS_V_LIST) {
 			if (md->count == 0)
 				md->count = LDMS_LIST_HEAP;
-			*heap_sz = *heap_sz + md->count;
+			_hsz += md->count;
 		}
 	}
+	if (*heap_sz < _hsz)
+		*heap_sz = _hsz;
 	*heap_sz = ldms_heap_size(*heap_sz);
 
 	if (set_array_card) {
@@ -1362,7 +1434,6 @@ static size_t compute_set_sizes(const char *instance_name, ldms_schema_t schema,
 		if (!*set_array_card)
 			*set_array_card = 1;
 	}
-
 
 	*meta_sz = schema->meta_sz		/* header + metric dict */
 		 + strlen(schema->name) + 2	/* schema name + '\0' + len */
@@ -1442,10 +1513,11 @@ static void __ldms_schema_finalize(ldms_schema_t schema)
 {
 	if (memcmp(&schema->digest, &null_digest, LDMS_DIGEST_LENGTH))
 		return;
-	SHA256_Final(schema->digest.digest, &schema->sha_ctxt);
+	unsigned int len = LDMS_DIGEST_LENGTH;
+	EVP_DigestFinal_ex(schema->evp_ctx, schema->digest.digest, &len);
 }
 
-ldms_set_t ldms_set_new_custom(const char *instance_name,
+ldms_set_t ldms_set_create(const char *instance_name,
 				ldms_schema_t schema,
 				uid_t uid, gid_t gid, mode_t perm,
 				uint32_t heap_sz)
@@ -1469,14 +1541,12 @@ ldms_set_t ldms_set_new_custom(const char *instance_name,
 		return NULL;
 	}
 
+	hsz = heap_sz;
 	int ssz = compute_set_sizes(instance_name, schema,
 				    &set_array_card, &meta_sz,
 				    &array_data_sz, &hsz);
 	if (!ssz)
 		return NULL;
-
-	/* Use the given heap size instead of the cached value in the schema. */
-	hsz = heap_sz;
 
 	__ldms_schema_finalize(schema);
 
@@ -1606,11 +1676,14 @@ ldms_set_t ldms_set_new_custom(const char *instance_name,
 
 	data_base = (void*)meta + le32toh(meta->meta_sz);
 	set = __record_set(instance_name, meta, data_base, LDMS_SET_F_LOCAL);
-	if (!set)
+	if (!set) {
 		mm_free(meta);
-	if (meta->heap_sz)
+		return NULL;
+	}
+	if (meta->heap_sz) {
 		set->heap = ldms_heap_get(&set->heap_inst, &set->data->heap,
 				&((uint8_t *)set->data)[schema->data_sz]);
+	}
 	__init_rec_array(set, schema);
 	return set;
 }
@@ -1619,11 +1692,7 @@ ldms_set_t ldms_set_new_with_auth(const char *instance_name,
 				  ldms_schema_t schema,
 				  uid_t uid, gid_t gid, mode_t perm)
 {
-	size_t meta_sz = 0, array_data_sz = 0, heap_sz = 0;
-	int set_array_card;
-	(void) compute_set_sizes(instance_name, schema, &set_array_card,
-					&meta_sz, &array_data_sz, &heap_sz);
-	return ldms_set_new_custom(instance_name, schema, uid, gid, perm, heap_sz);
+	return ldms_set_create(instance_name, schema, uid, gid, perm, 0);
 }
 
 ldms_set_t ldms_set_new_with_heap(const char *instance_name,
@@ -1634,7 +1703,7 @@ ldms_set_t ldms_set_new_with_heap(const char *instance_name,
 	mode_t perm;
 
 	ldms_set_default_authz(&uid, &gid, &perm, DEFAULT_AUTHZ_READONLY);
-	return ldms_set_new_custom(instance_name, schema, uid, gid, perm, heap_sz);
+	return ldms_set_create(instance_name, schema, uid, gid, perm, heap_sz);
 }
 
 size_t ldms_list_heap_size_get(enum ldms_value_type type, size_t item_count, size_t array_count)
@@ -1652,14 +1721,9 @@ ldms_set_t ldms_set_new(const char *instance_name, ldms_schema_t schema)
 	uid_t uid;
 	gid_t gid;
 	mode_t perm;
-	size_t meta_sz = 0, array_data_sz = 0, heap_sz = 0;
-	int set_array_card;
-
-	(void) compute_set_sizes(instance_name, schema, &set_array_card,
-					&meta_sz, &array_data_sz, &heap_sz);
 
 	ldms_set_default_authz(&uid, &gid, &perm, DEFAULT_AUTHZ_READONLY);
-	return ldms_set_new_custom(instance_name, schema, uid, gid, perm, heap_sz);
+	return ldms_set_create(instance_name, schema, uid, gid, perm, 0);
 }
 
 int ldms_set_config_auth(ldms_set_t set, uid_t uid, gid_t gid, mode_t perm)
@@ -1921,12 +1985,12 @@ int __schema_mdef_add(ldms_schema_t s, ldms_mdef_t m)
 		ldms_mdef_t rec_m;
 		rec_def = container_of(m, struct ldms_record, mdef);
 		STAILQ_FOREACH(rec_m, &rec_def->rec_metric_list, entry) {
-			SHA256_Update(&s->sha_ctxt, rec_m->name, strlen(rec_m->name));
-			SHA256_Update(&s->sha_ctxt, &rec_m->type, sizeof(rec_m->type));
+			EVP_DigestUpdate(s->evp_ctx, rec_m->name, strlen(rec_m->name));
+			EVP_DigestUpdate(s->evp_ctx, &rec_m->type, sizeof(rec_m->type));
 		}
 	}
-	SHA256_Update(&s->sha_ctxt, m->name, strlen(m->name));
-	SHA256_Update(&s->sha_ctxt, &m->type, sizeof(m->type));
+	EVP_DigestUpdate(s->evp_ctx, m->name, strlen(m->name));
+	EVP_DigestUpdate(s->evp_ctx, &m->type, sizeof(m->type));
 
 	STAILQ_INSERT_TAIL(&s->metric_list, m, entry);
 	s->card++;
@@ -3665,12 +3729,17 @@ int ldms_mval_parse_scalar(ldms_mval_t v, enum ldms_value_type vt, const char *s
 #define DELETE_TIMEOUT	(60)	/* 1 minute */
 #define DELETE_CHECK	(15)
 
+extern int ldms_xprt_connected(struct ldms_xprt *x);
 static void *delete_proc(void *arg)
 {
-	struct rbn *rbn;
+	struct rbn *rbn, *prev_rbn, *xrbn;
 	struct ldms_set *set;
+	struct ldms_lookup_peer *lp;
+	struct ldms_push_peer *pp;
 	ldms_name_t name;
 	time_t dur;
+	ldms_t x;
+	struct ldms_context *ctxt;
 	char *to = getenv("LDMS_DELETE_TIMEOUT");
 	int timeout = (to ? atoi(to) : DELETE_TIMEOUT);
 	if (timeout <= DELETE_CHECK)
@@ -3684,6 +3753,7 @@ static void *delete_proc(void *arg)
 		pthread_mutex_lock(&__del_tree_lock);
 		rbn = rbt_max(&__del_tree);
 		while (rbn) {
+			prev_rbn = rbn_pred(rbn);
 			set = container_of(rbn, struct ldms_set, del_node);
 			name = get_instance_name(set->meta);
 			dur = time(NULL) - set->del_time;
@@ -3694,13 +3764,133 @@ static void *delete_proc(void *arg)
 			fflush(stderr);
 			if (dur < timeout)
 				break;
+
+			/*
+			 * Look for a connected push/lookup peer.
+			 * If there is a connected peer, we skip the set
+			 * and wait for the SET_DELETE reply from the connected peers.
+			 *
+			 * This prevents the race between the SET_DELETE timeout
+			 * and the SET_DELETE reply.
+			 */
+			pthread_mutex_lock(&set->lock);
+			xrbn = rbt_min(&set->lookup_coll);
+			while (xrbn) {
+				lp = container_of(xrbn, struct ldms_lookup_peer, rbn);
+				if (ldms_xprt_connected(lp->xprt)) {
+					/*
+					 * A push peer is connected... skip the set.
+					 */
+					pthread_mutex_unlock(&set->lock);
+					goto next;
+				}
+				xrbn = rbn_succ(xrbn);
+			}
+			xrbn = rbt_min(&set->push_coll);
+			while (xrbn) {
+				pp = container_of(xrbn, struct ldms_push_peer, rbn);
+				if (ldms_xprt_connected(pp->xprt)) {
+					/*
+					 * A lookup peer is connected ... skip the set.
+					 */
+					pthread_mutex_unlock(&set->lock);
+					goto next;
+				}
+			}
+			pthread_mutex_unlock(&set->lock);
 			fprintf(stderr,
 				"Deleting dangling set %s with reference "
 				"count %d, waited %jd seconds\n",
 				name->name, set->ref.ref_count, dur);
 			ref_dump(&set->ref, __func__, stderr);
+
+			/*
+			 * Since all peers have disconnected, the push and lookup
+			 * collections should be empty at this point.
+			 *
+			 * Below logic is for a corner case and makes sure
+			 * that we are not leaking and leaving the transport dangling.
+			 */
+			/* Clean up the push peer collection */
+			while ((rbn = rbt_min(&set->push_coll))) {
+				rbt_del(&set->push_coll, rbn);
+				pp = container_of(rbn, struct ldms_push_peer, rbn);
+				if (!pp->xprt)
+					goto free_pp;
+				x = pp->xprt;
+				pthread_mutex_lock(&x->lock);
+				TAILQ_FOREACH(ctxt, &x->ctxt_list, link) {
+					switch (ctxt->type) {
+					case LDMS_CONTEXT_LOOKUP_READ:
+						if (ctxt->lu_read.s == set)
+							ctxt->lu_read.s = NULL;
+						break;
+					case LDMS_CONTEXT_UPDATE:
+					case LDMS_CONTEXT_UPDATE_META:
+						if (ctxt->update.s == set)
+							ctxt->update.s = NULL;
+						break;
+					case LDMS_CONTEXT_REQ_NOTIFY:
+						if (ctxt->req_notify.s == set)
+							ctxt->req_notify.s = NULL;
+						break;
+					case LDMS_CONTEXT_SET_DELETE:
+						if (ctxt->set_delete.s == set)
+							ctxt->set_delete.s = NULL;
+						break;
+					default:
+						break;
+					}
+				}
+				pthread_mutex_unlock(&x->lock);
+				ldms_xprt_put(x);
+			free_pp:
+				free(pp);
+			}
+
+			/*
+			 * Clean up the lookup peer collection and
+			 * remove set from the transport's set collection.
+			 */
+			while ((rbn = rbt_min(&set->lookup_coll))) {
+				rbt_del(&set->lookup_coll, rbn);
+				lp = container_of(rbn, struct ldms_lookup_peer, rbn);
+				if (!lp->xprt)
+					goto free_lp;
+				x = lp->xprt;
+				pthread_mutex_lock(&x->lock);
+				TAILQ_FOREACH(ctxt, &x->ctxt_list, link) {
+					switch (ctxt->type) {
+					case LDMS_CONTEXT_LOOKUP_READ:
+						if (ctxt->lu_read.s == set)
+							ctxt->lu_read.s = NULL;
+						break;
+					case LDMS_CONTEXT_UPDATE:
+					case LDMS_CONTEXT_UPDATE_META:
+						if (ctxt->update.s == set)
+							ctxt->update.s = NULL;
+						break;
+					case LDMS_CONTEXT_REQ_NOTIFY:
+						if (ctxt->req_notify.s == set)
+							ctxt->req_notify.s = NULL;
+						break;
+					case LDMS_CONTEXT_SET_DELETE:
+						if (ctxt->set_delete.s == set)
+							ctxt->set_delete.s = NULL;
+						break;
+					default:
+						break;
+					}
+				}
+				pthread_mutex_unlock(&x->lock);
+				ldms_xprt_put(x);
+			free_lp:
+				free(lp);
+			}
+
 			__destroy_set_no_lock(set);
-			rbn = rbt_max(&__del_tree);
+		next:
+			rbn = prev_rbn;
 			fflush(stderr);
 		}
 		pthread_mutex_unlock(&__del_tree_lock);
@@ -3947,12 +4137,19 @@ int ldms_record_metric_add(ldms_record_t rec_def, const char *name,
 	mdef = calloc(1, sizeof(*mdef));
 	if (!mdef)
 		return -ENOMEM;
-	mdef->name = strdup(name);
-	if (!mdef->name)
-		goto err_1;
-	mdef->unit = strdup(unit);
-	if (!mdef->unit)
-		goto err_2;
+        if (name != NULL) {
+                mdef->name = strdup(name);
+                if (!mdef->name)
+                        goto err_1;
+        } else {
+                errno = EINVAL;
+                goto err_1;
+        }
+        if (unit != NULL) {
+                mdef->unit = strdup(unit);
+                if (!mdef->unit)
+                        goto err_2;
+        }
 	mdef->type = type;
 	mdef->count = count;
 
@@ -3988,6 +4185,11 @@ size_t ldms_record_heap_size_get(ldms_record_t rec_def)
 	size_t sz = rec_def->inst_sz + sizeof(struct ldms_list_entry);
 	sz = ldms_heap_alloc_size(LDMS_LIST_GRAIN, sz);
 	return sz;
+}
+
+size_t ldms_record_value_size_get(ldms_record_t rec_def)
+{
+	return rec_def->inst_sz - sizeof(struct ldms_record_inst);
 }
 
 int ldms_record_card(ldms_mval_t rec)
@@ -4720,15 +4922,21 @@ int ldms_schema_metric_add_template(ldms_schema_t s,
 	for (i=0, ent=tmp; ent->name || ent->rec_def; i++,ent++) {
 		switch (ent->type) {
 		case LDMS_V_RECORD_TYPE:
+			if (ent->flags & LDMS_MDESC_F_META)
+				return -EINVAL;
 			ret = ldms_schema_record_add(s, ent->rec_def);
 			break;
 		case LDMS_V_RECORD_ARRAY:
+			if (ent->flags & LDMS_MDESC_F_META)
+				return -EINVAL;
 			ret = ldms_schema_record_array_add(
 					s, ent->name, ent->rec_def,
 					ent->len
 				 );
 			break;
 		case LDMS_V_LIST:
+			if (ent->flags & LDMS_MDESC_F_META)
+				return -EINVAL;
 			ret = ldms_schema_metric_list_add(
 					s, ent->name, ent->unit, ent->len
 				 );
@@ -4744,9 +4952,15 @@ int ldms_schema_metric_add_template(ldms_schema_t s,
 		case LDMS_V_S64:
 		case LDMS_V_F32:
 		case LDMS_V_D64:
-			ret = ldms_schema_metric_add_with_unit(
-					s, ent->name, ent->unit, ent->type
-				 );
+			if (ent->flags & LDMS_MDESC_F_META) {
+				ret = ldms_schema_meta_add_with_unit(
+						s, ent->name, ent->unit, ent->type
+						);
+			} else {
+				ret = ldms_schema_metric_add_with_unit(
+						s, ent->name, ent->unit, ent->type
+						);
+			}
 			break;
 		case LDMS_V_CHAR_ARRAY:
 		case LDMS_V_U8_ARRAY:
@@ -4759,10 +4973,17 @@ int ldms_schema_metric_add_template(ldms_schema_t s,
 		case LDMS_V_S64_ARRAY:
 		case LDMS_V_F32_ARRAY:
 		case LDMS_V_D64_ARRAY:
-			ret = ldms_schema_metric_array_add_with_unit(
-					s, ent->name, ent->unit,
-					ent->type, ent->len
-				 );
+			if (ent->flags & LDMS_MDESC_F_META) {
+				ret = ldms_schema_meta_array_add_with_unit(
+						s, ent->name, ent->unit,
+						ent->type, ent->len
+					 );
+			} else {
+				ret = ldms_schema_metric_array_add_with_unit(
+						s, ent->name, ent->unit,
+						ent->type, ent->len
+					 );
+			}
 			break;
 		default:
 			return -EINVAL;

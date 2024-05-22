@@ -731,6 +731,8 @@ typedef struct ldms_cred {
 	gid_t gid;
 } *ldms_cred_t;
 
+extern const char *ldms_xprt_event_type_to_str(enum ldms_xprt_event_type t);
+
 /**
  * Definition of callback function for ldms_xprt_connect and ldms_xprt_listen.
  *
@@ -1260,6 +1262,7 @@ extern void ldms_xprt_stats(ldms_t x, ldms_xprt_stats_t stats);
  */
 typedef struct ldms_metric_template_s {
 	const char *name;
+	int flags;
 	enum ldms_value_type type;
 	const char *unit;
 	uint32_t len; /* array_len for ARRAY, or heap_sz for LIST */
@@ -1358,8 +1361,8 @@ void ldms_record_delete(ldms_record_t rec_def);
  * Add a metric member into the record.
  *
  * \param rec_def   The handle returned by \c ldms_record_create().
- * \param name      The name of the metric.
- * \param unit      The unit of the metric.
+ * \param name      The name of the metric. (May not be NULL)
+ * \param unit      The unit of the metric. (May be NULL)
  * \param type      The type of the metric. Only support char, basic number
  *                  types and their arrays: LDMS_V_CHAR, LDMS_V_CHAR_ARRAY,
  *                  LDMS_V_U8, LDMS_V_S8, LDMS_V_U8_ARRAY, LDMS_V_S8_ARRAY,
@@ -1382,7 +1385,8 @@ int ldms_record_metric_add(ldms_record_t rec_def, const char *name,
  *
  * This is a convenient function that creates a record type definition and add
  * metric members in one go. The \c tmp array must be terminated with
- * {0,0,0,0}.
+ * {0}. The \c flags field of the template entries is ignored because
+ *  a record types is always a meta metric.
  *
  * REMARK: A record metric must NOT be a record or a list.
  *
@@ -1401,6 +1405,9 @@ ldms_record_t ldms_record_from_template(const char *name,
 
 /**
  * \brief Like \c ldms_record_metric_add(), but using metric template.
+ *
+ * The \c flags field of the template entries is ignored because a record type
+ *  is always a meta metric.
  *
  * \param        s The schema handle.
  * \param[in]  tmp The array of metric templates (terminated with {0}).
@@ -1426,6 +1433,15 @@ int ldms_record_metric_add_template(ldms_record_t rec_def,
  * \retval bytes The size of the record instance in the heap.
  */
 size_t ldms_record_heap_size_get(ldms_record_t rec_def);
+
+/**
+ * Get the size (bytes) of the heap memory storing the record metric values.
+ *
+ * \param rec_def  The handle returned by \c ldms_record_create().
+ *
+ * \retval bytes The size of the heap memory
+ */
+size_t ldms_record_value_size_get(ldms_record_t rec_def);
 
 void _ldms_set_ref_get(ldms_set_t s, const char *reason, const char *func, int line);
 int _ldms_set_ref_put(ldms_set_t s, const char *reason, const char *func, int line);
@@ -1540,7 +1556,8 @@ ldms_set_t ldms_set_new_with_auth(const char *instance_name,
  * \param uid             The user ID of the set owner
  * \param gid             The group ID of the set owner
  * \param perm            The UNIX mode_t bits (see chmod)
- * \param heap_sz         The size of the set heap
+ * \param heap_sz         The size of the set heap. If 0 is given,
+ *                        the heap size is the size set in \c schema.
  *
  * \return A pointer to a metric set or NULL if there is an error.
  *         Errno will be set as appropriate as follows:
@@ -1550,7 +1567,7 @@ ldms_set_t ldms_set_new_with_auth(const char *instance_name,
  *
  * \see ldms_set_new(), ldms_set_new_with_auth(), ldms_set_new_with_heap()
  */
-ldms_set_t ldms_set_new_custom(const char *instance_name,
+ldms_set_t ldms_set_create(const char *instance_name,
 				  ldms_schema_t schema,
 				  uid_t uid, gid_t gid, mode_t perm,
 				  uint32_t heap_sz);
@@ -1735,6 +1752,17 @@ extern ldms_digest_t ldms_set_digest_get(ldms_set_t s);
  * \retval buf  If succeeded, the output buffer containing formatted digest
  */
 extern const char *ldms_digest_str(ldms_digest_t digest, char *buf, int buf_len);
+
+/**
+ * Populate \c digest according to hex string representation.
+ *
+ * \param [in]  str    The hexadecimal string representation of the digest.
+ * \param [out] digest The digest.
+ *
+ * \retval 0     If there are no errors, or
+ * \retval errno If there is an error.
+ */
+int ldms_str_digest(const char *str, ldms_digest_t digest);
 
 /**
  * \brief Compare LDMS digests

@@ -1,6 +1,6 @@
 dnl Process this file with autoconf to produce a configure script.
 
-AC_PREREQ(2.63)
+AC_PREREQ(2.64)
 AC_INIT([ovis-ldms],
         m4_esyscmd([config/git-version-gen --prefix 'OVIS-' .tarball-version]),
         [ovis-help@sandia.gov])
@@ -10,6 +10,7 @@ AC_CONFIG_AUX_DIR(config)
 AM_CONFIG_HEADER(config.h)
 AC_REQUIRE_AUX_FILE([tap-driver.sh])
 AC_PROG_CC
+gl_EARLY
 AM_INIT_AUTOMAKE([foreign tar-pax])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 AX_PREFIX_CONFIG_H_G(ovis-ldms-config.h,,,[
@@ -35,6 +36,7 @@ AX_PREFIX_CONFIG_H_G(ovis-ldms-config.h,,,[
 #endif
 ])
 AM_PROG_LIBTOOL
+gl_INIT
 AC_LIB_RPATH
 
 dnl if LEX is not available, the configure still won't fail
@@ -288,6 +290,7 @@ OPTION_DEFAULT_ENABLE([synthetic], [ENABLE_SYNTHETIC])
 OPTION_DEFAULT_ENABLE([varset], [ENABLE_VARSET])
 OPTION_DEFAULT_ENABLE([lnet_stats], [ENABLE_LNET_STATS])
 OPTION_DEFAULT_ENABLE([meminfo], [ENABLE_MEMINFO])
+OPTION_DEFAULT_DISABLE([gpumetrics], [ENABLE_GPU_METRICS])
 OPTION_DEFAULT_ENABLE([coretemp], [ENABLE_CORETEMP])
 OPTION_DEFAULT_DISABLE([filesingle], [ENABLE_FILESINGLE])
 OPTION_DEFAULT_DISABLE([msr_interlagos], [ENABLE_MSR_INTERLAGOS])
@@ -314,8 +317,6 @@ OPTION_DEFAULT_ENABLE([tsampler], [ENABLE_TSAMPLER])
 OPTION_DEFAULT_ENABLE([cray_power_sampler], [ENABLE_CRAY_POWER_SAMPLER])
 dnl cray_power_sampler won't build with --disable-tsampler
 
-OPTION_DEFAULT_DISABLE([opa2], [ENABLE_OPA2])
-OPTION_DEFAULT_DISABLE([ibnet], [ENABLE_IBNET])
 OPTION_DEFAULT_ENABLE([loadavg], [ENABLE_LOADAVG])
 OPTION_DEFAULT_ENABLE([vmstat], [ENABLE_VMSTAT])
 OPTION_DEFAULT_ENABLE([procdiskstats], [ENABLE_PROCDISKSTATS])
@@ -335,7 +336,7 @@ OPTION_DEFAULT_DISABLE([kokkos], [ENABLE_KOKKOS])
 OPTION_DEFAULT_ENABLE([jobinfo-sampler], [ENABLE_JOBINFO])
 OPTION_DEFAULT_DISABLE([ibm_occ], [ENABLE_IBM_OCC_SAMPLER])
 OPTION_DEFAULT_DISABLE([appinfo], [ENABLE_APPINFO])
-OPTION_DEFAULT_DISABLE([app-sampler], [ENABLE_APP_SAMPLER])
+OPTION_DEFAULT_ENABLE([app-sampler], [ENABLE_APP_SAMPLER])
 OPTION_DEFAULT_DISABLE([store-app], [ENABLE_STORE_APP])
 OPTION_DEFAULT_DISABLE([test_sampler], [ENABLE_TEST_SAMPLER])
 OPTION_DEFAULT_DISABLE([list_sampler], [ENABLE_LIST_SAMPLER])
@@ -349,6 +350,27 @@ AM_CONDITIONAL([ENABLE_GRPTEST_LDMS_TEST], [test "x$ENABLE_LDMS_TEST_FALSE" = "x
 dnl options for contributed samplers
 OPTION_DEFAULT_DISABLE([ipmireader], [ENABLE_IPMIREADER])
 OPTION_DEFAULT_DISABLE([tutorial-sampler],[ENABLE_TUTORIAL_SAMPLER])
+
+dnl Variorum dependency support
+AC_ARG_ENABLE([variorum],
+    [AS_HELP_STRING([--enable-variorum], [require components that depend upon libvariorum (and libjansson) @<:@default=check@:>@])],
+    [],
+    [enable_variorum="check"])
+AS_IF([test "x$enable_variorum" != xno],[
+    AC_LIB_HAVE_LINKFLAGS([variorum], [], [#include <variorum.h>
+                           #include <variorum_topology.h>])
+    AS_IF([test "x$enable_variorum" != xcheck],[
+        AS_IF([test "x$HAVE_LIBVARIORUM" = xno],
+            [AC_MSG_ERROR([libvariorum or headers not found])])
+    ])
+    AC_LIB_HAVE_LINKFLAGS([jansson], [], [#include <jansson.h>])
+    AS_IF([test "x$enable_variorum" != xcheck],[
+        AS_IF([test "x$HAVE_LIBJANSSON" = xno],
+            [AC_MSG_ERROR([libjansson or headers not found])])
+    ])
+])
+AM_CONDITIONAL([HAVE_LIBVARIORUM], [test "x$HAVE_LIBVARIORUM" = xyes])
+AM_CONDITIONAL([HAVE_LIBJANSSON], [test "x$HAVE_LIBJANSSON" = xyes])
 
 dnl check for libcurl if influx is configured
 OPTION_DEFAULT_DISABLE([influx], [ENABLE_INFLUX])
@@ -381,32 +403,64 @@ AS_IF([test "x$enable_papi" != xno],[
 AM_CONDITIONAL([HAVE_LIBPAPI], [test "x$HAVE_LIBPAPI" = xyes])
 AM_CONDITIONAL([HAVE_LIBPFM], [test "x$HAVE_LIBPFM" = xyes])
 
+AC_LIB_HAVE_LINKFLAGS([ibmad], [], [#include <infiniband/mad.h>])
+AM_CONDITIONAL([HAVE_LIBIBMAD], [test "x$HAVE_LIBIBMAD" = xyes])
+
+AC_LIB_HAVE_LINKFLAGS([ibumad], [], [#include <infiniband/umad.h>])
+AM_CONDITIONAL([HAVE_LIBIBUMAD], [test "x$HAVE_LIBIBUMAD" = xyes])
+
+AC_LIB_HAVE_LINKFLAGS([osmcomp], [], [])
+AM_CONDITIONAL([HAVE_LIBOSMCOMP], [test "x$HAVE_LIBOSMCOMP" = xyes])
+
+CPPFLAGS_BACKUP=$CPPFLAGS
+CPPFLAGS="$CPPFLAGS -I/usr/include/infiniband"
+AC_CHECK_HEADERS([iba/ib_types.h], [], [])
+AC_CHECK_HEADERS([complib/cl_nodenamemap.h], [], [])
+CPPFLAGS=$CPPFLAGS_BACKUP
+AM_CONDITIONAL([HAVE_IBA_IB_TYPES_H], [test "x$ac_cv_header_iba_ib_types_h" = xyes])
+AM_CONDITIONAL([HAVE_COMPLIB_CL_NODENAMEMAP_H], [test "x$ac_cv_header_complib_cl_nodenamemap_h" = xyes])
+
 AC_ARG_ENABLE([infiniband],
 	[AS_HELP_STRING([--enable-infiniband], [require components that depend upon libibmad and libibumad @<:@default=check@:>@])],
 	[],
 	[enable_infiniband="check"])
-AS_IF([test "x$enable_infiniband" != xno],[
-	AC_LIB_HAVE_LINKFLAGS([ibmad], [], [#include <infiniband/mad.h>])
-	AS_IF([test "x$enable_infiniband" != xcheck],[
-		AS_IF([test "x$HAVE_LIBIBMAD" = xno],
-			[AC_MSG_ERROR([libibmad or <infiniband/mad.h> not found])])
-	])
-	AC_LIB_HAVE_LINKFLAGS([ibumad], [], [#include <infiniband/umad.h>])
-	AS_IF([test "x$enable_infiniband" != xcheck],[
-		AS_IF([test "x$HAVE_LIBIBUMAD" = xno],
-			[AC_MSG_ERROR([libibumad or <infiniband/umad.h> not found])])
-	])
-        CPPFLAGS_BACKUP=$CPPFLAGS
-        CPPFLAGS="$CPPFLAGS -I/usr/include/infiniband"
-        AC_CHECK_HEADERS([iba/ib_types.h], [], [
-		AS_IF([test "x$enable_infiniband" != xcheck],
-			[AC_MSG_ERROR([Header <infiniband/iba/ib_types.h> not found ])])
-        ])
-        CPPFLAGS=$CPPFLAGS_BACKUP
+AM_CONDITIONAL([ENABLE_INFINIBAND], [test "xenable_infiniband" != xno])
+AS_IF([test "x$enable_infiniband" = xyes],[
+	AS_IF([test "x$HAVE_LIBIBMAD" = xno],
+		[AC_MSG_ERROR([infiniband required libibmad or <infiniband/mad.h> not found])])
+	AS_IF([test "x$HAVE_LIBIBUMAD" = xno],
+		[AC_MSG_ERROR([infiniband required libibumad or <infiniband/umad.h> not found])])
+	AS_IF([test "x$ac_cv_header_iba_ib_types_h" = xno],
+		[AC_MSG_ERROR([infiniband required <infiniband/iba/ib_types.h> not found ])])
 ])
-AM_CONDITIONAL([HAVE_LIBIBMAD], [test "x$HAVE_LIBIBMAD" = xyes])
-AM_CONDITIONAL([HAVE_LIBIBUMAD], [test "x$HAVE_LIBIBUMAD" = xyes])
-AM_CONDITIONAL([HAVE_IBA_IB_TYPES_H], [test "x$ac_cv_header_iba_ib_types_h" = xyes])
+
+AC_ARG_ENABLE([ibnet],
+	[AS_HELP_STRING([--enable-ibnet], [require the ibnet plugin @<:@default=check@:>@])],
+	[],
+	[enable_ibnet="check"])
+AM_CONDITIONAL([ENABLE_IBNET], [test "xenable_ibnet" != xno])
+AS_IF([test "$enable_ibnet" = xyes],[
+	AS_IF([test "x$HAVE_LIBIBMAD" = xno],
+		[AC_MSG_ERROR([ibnet required libibmad or <infiniband/mad.h> not found])])
+	AS_IF([test "x$HAVE_LIBIBUMAD" = xno],
+		[AC_MSG_ERROR([ibnet required libibumad or <infiniband/umad.h> not found])])
+	AS_IF([test "x$HAVE_LIBOSMCOMP" = xno],
+		[AC_MSG_ERROR([ibnet required libosmcomp not found])])
+	AS_IF([test "x$ac_cv_header_complib_cl_nodenamemap_h" = xno],
+		[AC_MSG_ERROR([ibnet required <infiniband/complib/cl_nodenamemap.h> not found ])])
+])
+
+AC_ARG_ENABLE([opa2],
+	[AS_HELP_STRING([--enable-opa2], [require the opa2 plugin @<:@default=check@:>@])],
+	[],
+	[enable_opa2="check"])
+AM_CONDITIONAL([ENABLE_OPA2], [test "xenable_opa2" != xno])
+AS_IF([test "x$enable_opa2" = xyes],[
+	AS_IF([test "x$HAVE_LIBIBMAD" = xno],
+		[AC_MSG_ERROR([opa2 required libibmad or <infiniband/mad.h> not found])])
+	AS_IF([test "x$HAVE_LIBIBUMAD" = xno],
+		[AC_MSG_ERROR([opa2 required libibumad or <infiniband/umad.h> not found])])
+])
 
 # enable tx2mon by default only when sensible.
 AC_ARG_ENABLE([tx2mon],
@@ -481,6 +535,74 @@ AX_LIB_READLINE
 LDFLAGS_READLINE=$LIBS
 AC_SUBST([LDFLAGS_READLINE])
 LIBS=$TMPLIBS
+
+dnl GEOPM telemetry support
+AC_MSG_CHECKING([for GEOPM telemetry library])
+AC_ARG_WITH([geopm],
+        [AS_HELP_STRING([--with-geopm],
+                [build GEOPM telemetry sampler @<:@default=check@:>@])],
+                [AS_IF([test "x$withval" != xyes -a "x$withval" != xno],
+                        [GEOPM_CFLAGS="-I$withval/include"
+                         GEOPM_LDFLAGS="-L$withval/lib64 -L$withval/lib"]
+                )],
+        [with_geopm=check])
+have_geopm=no
+AC_SUBST([GEOPM_CFLAGS])
+AC_SUBST([GEOPM_LDFLAGS])
+AS_IF([test "x$with_geopm" != xno], [
+        save_LDFLAGS=$LDFLAGS
+        LDFLAGS="$LDFLAGS $GEOPM_LDFLAGS"
+        save_CFLAGS=$CFLAGS
+        CFLAGS="$CFLAGS $GEOPM_CFLAGS"
+        save_CPPFLAGS=$CPPFLAGS
+        CPPFLAGS="$CPPFLAGS $GEOPM_CFLAGS"
+        AC_CHECK_HEADER(geopm_pio.h, [have_geopm=yes], [have_geopm=no])
+        AC_CHECK_HEADER(geopm_topo.h, [have_geopm=yes], [have_geopm=no])
+        AC_CHECK_LIB([geopmd], [geopm_pio_push_signal], [have_geopm=yes], [have_geopm=no])
+        AC_CHECK_LIB([geopmd], [geopm_pio_reset], [have_geopm=yes], [have_geopm=no])
+        CPPFLAGS=$save_CPPFLAGS
+        CFLAGS=$save_CFLAGS
+        LDFLAGS=$save_LDFLAGS
+])
+AM_CONDITIONAL([ENABLE_GEOPM_SAMPLER], [test x$have_geopm = xyes])
+AM_COND_IF([ENABLE_GEOPM_SAMPLER],[
+        AC_DEFINE([ENABLE_GEOPM_SAMPLER], [], [Build GEOPM telemetry sampler])
+])
+AC_MSG_RESULT([$with_geopm])
+
+dnl DAOS telemetry support
+AC_ARG_WITH([daos],
+	[AS_HELP_STRING([--with-daos],
+		[build DAOS telemetry sampler @<:@default=check@:>@])],
+		[AS_IF([test "x$withval" != xyes -a "x$withval" != xno],
+			[DAOS_CFLAGS="-I$withval/include"
+			 DAOS_LDFLAGS="-L$withval/lib64"]
+		)],
+	[with_daos=check])
+have_daos=no
+AC_SUBST([DAOS_CFLAGS])
+AC_SUBST([DAOS_LDFLAGS])
+AS_IF([test "x$with_daos" != xno], [
+	save_LDFLAGS=$LDFLAGS
+	LDFLAGS="$LDFLAGS $DAOS_LDFLAGS"
+	save_CFLAGS=$CFLAGS
+	CFLAGS="$CFLAGS $DAOS_CFLAGS"
+	save_CPPFLAGS=$CPPFLAGS
+	CPPFLAGS="$CPPFLAGS $DAOS_CFLAGS"
+	AC_CHECK_HEADER(gurt/common.h, [have_daos=yes], [have_daos=no])
+	AC_CHECK_HEADER(gurt/telemetry_common.h, [have_daos=yes], [have_daos=no])
+	AC_CHECK_HEADER(gurt/telemetry_consumer.h, [have_daos=yes], [have_daos=no])
+	AC_CHECK_LIB([gurt], [d_tm_init], [have_daos=yes], [have_daos=no])
+	CPPFLAGS=$save_CPPFLAGS
+	CFLAGS=$save_CFLAGS
+	LDFLAGS=$save_LDFLAGS
+])
+AM_CONDITIONAL([ENABLE_DAOS_SAMPLER], [test x$have_daos = xyes])
+AM_COND_IF([ENABLE_DAOS_SAMPLER],[
+	AC_DEFINE([ENABLE_DAOS_SAMPLER], [], [Build DAOS telemetry sampler])
+])
+AC_MSG_CHECKING([for DAOS telemetry support])
+AC_MSG_RESULT([$have_daos])
 
 dnl Munge library check
 if test -z "$ENABLE_MUNGE_TRUE"; then
@@ -709,6 +831,7 @@ LIBS=""
 ## stuff from top
 OPTION_DEFAULT_DISABLE([libgenders], [ENABLE_LIBGENDERS],[  requires C++,boost])
 OPTION_DEFAULT_DISABLE([genderssystemd], [ENABLE_TOSS_SYSTEMD],[  toss systemd init scripts])
+OPTION_DEFAULT_DISABLE([csv_check], [ENABLE_CSV_CHECK],[  requires C++,boost])
 OPTION_EXTRA_BUILD_DIRS([third-plugins], [ENABLE_THIRD_PLUGINS], [THIRD_PLUGINS_DIRS])
 
 if test -z "$ENABLE_LIBGENDERS_TRUE"
@@ -722,6 +845,14 @@ then
 	AX_CXX_CHECK_LIB(gendersplusplus,[Gendersplusplus::GendersException], [],
 		AC_MSG_ERROR([libgendersplusplus not found. ]))
 	LDFLAGS=$save_LDFLAGS
+	AC_LANG_POP([C++])
+	LIBS=""
+fi
+if test -z "$ENABLE_CSV_CHECK_TRUE"
+then
+	AC_LANG_PUSH([C++])
+	BOOST_REQUIRE( , AC_MSG_ERROR([csv_check enabled but boost not found.]))
+	BOOST_STRING_ALGO
 	AC_LANG_POP([C++])
 	LIBS=""
 fi
@@ -745,6 +876,24 @@ AS_IF([test "x$with_dcgm" != xno],
          ])],
       [have_dcgm=false])
 AM_CONDITIONAL([HAVE_DCGM], [test x$have_dcgm = xtrue])
+
+AM_CONDITIONAL([SYSCONFDIR_NOT_ETC], [test "${sysconfdir}" != "/etc"])
+
+AC_LIB_HAVE_LINKFLAGS([cxi], [], [
+#include <stddef.h> /* libcxi.h fails to include this */
+#include <libcxi/libcxi.h>
+])
+AM_CONDITIONAL([HAVE_LIBCXI], [test "x$HAVE_LIBCXI" = xyes])
+
+AC_ARG_ENABLE([slingshot],
+    [AS_HELP_STRING([--enable-slingshot], [require the slinghost related plugins @<:@default=check@:>@])],
+    [],
+    [enable_slingshot="check"])
+AM_CONDITIONAL([ENABLE_SLINGSHOT], [test "xenable_slingshot" != xno])
+AS_IF([test "x$enable_slingshot" = xyes],[
+    AS_IF([test "x$HAVE_LIBCXI" = xno],
+        [AC_MSG_ERROR([libcxi or its headers not found])])
+])
 
 # define substitutions for configvars and other sed-generated files.
 # note carefully the escapes.
@@ -826,6 +975,7 @@ lib/src/zap/test/Makefile
 lib/etc/Makefile
 lib/etc/ovis/Makefile
 lib/etc/ld.so.conf.d/Makefile
+gnulib/Makefile
 ldms/Makefile
 ldms/src/Makefile
 ldms/src/core/Makefile
@@ -835,9 +985,11 @@ ldms/src/sampler/Makefile
 ldms/src/decomp/Makefile
 ldms/src/decomp/static/Makefile
 ldms/src/decomp/as_is/Makefile
+ldms/src/decomp/flex/Makefile
 ldms/src/contrib/Makefile
 ldms/src/sampler/blob_stream/Makefile
 ldms/src/store/stream/Makefile
+ldms/src/store/test/Makefile
 ldms/src/store/kokkos/Makefile
 ldms/src/store/darshan/Makefile
 ldms/src/store/kokkos_appmon/Makefile
@@ -862,6 +1014,7 @@ ldms/src/sampler/llnl/Makefile
 ldms/src/sampler/lustre_client/Makefile
 ldms/src/sampler/lustre_mdt/Makefile
 ldms/src/sampler/lustre_ost/Makefile
+ldms/src/sampler/lustre_mdc/Makefile
 ldms/src/sampler/shm/Makefile
 ldms/src/sampler/shm/shm_util/Makefile
 ldms/src/sampler/shm/mpi_profiler/Makefile
@@ -869,6 +1022,7 @@ ldms/src/sampler/cray_system_sampler/Makefile
 ldms/src/sampler/aries_mmr/Makefile
 ldms/src/sampler/aries_mmr/aries_mmr_set_configs/Makefile
 ldms/src/sampler/ibmad_sampler/Makefile
+ldms/src/sampler/ibmad_records_sampler/Makefile
 ldms/src/sampler/ibnet/Makefile
 ldms/src/sampler/procnet/Makefile
 ldms/src/sampler/rdc_sampler/Makefile
@@ -880,6 +1034,7 @@ ldms/src/sampler/appinfo_lib/Makefile
 ldms/src/sampler/kgnilnd/Makefile
 ldms/src/sampler/tx2mon/Makefile
 ldms/src/sampler/meminfo/Makefile
+ldms/src/contrib/sampler/gpu_metrics_sampler/Makefile
 ldms/src/sampler/procinterrupts/Makefile
 ldms/src/sampler/procnetdev2/Makefile
 ldms/src/sampler/variable/Makefile
@@ -897,9 +1052,15 @@ ldms/src/sampler/examples/record_sampler/Makefile
 ldms/src/sampler/ibm_occ/Makefile
 ldms/src/sampler/syspapi/Makefile
 ldms/src/sampler/app_sampler/Makefile
+ldms/src/sampler/slingshot_metrics/Makefile
+ldms/src/sampler/slingshot_info/Makefile
 ldms/src/contrib/sampler/Makefile
+ldms/src/contrib/sampler/daos/Makefile
+ldms/src/contrib/sampler/daos/test/Makefile
 ldms/src/contrib/sampler/ipmireader/Makefile
 ldms/src/contrib/sampler/tutorial/Makefile
+ldms/src/contrib/sampler/variorum_sampler/Makefile
+ldms/src/contrib/sampler/geopm_sampler/Makefile
 ldms/src/third-plugins/Makefile
 ldms/src/ldmsd/Makefile
 ldms/src/ldmsd/test/Makefile

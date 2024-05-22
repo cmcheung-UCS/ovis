@@ -758,6 +758,9 @@ static void _rdma_context_free(struct z_rdma_context *ctxt)
 static int queue_io(struct z_rdma_ep *rep, struct z_rdma_context *ctxt)
 {
 	TAILQ_INSERT_TAIL(&rep->io_q, ctxt, pending_link);
+	__atomic_fetch_add(&rep->ep.sq_sz, 1, __ATOMIC_SEQ_CST);
+	if (rep->ep.thread)
+		__atomic_fetch_add(&rep->ep.thread->stat->sq_sz, 1, __ATOMIC_SEQ_CST);
 	ctxt->is_pending = 1;
 	return 0;
 }
@@ -774,6 +777,9 @@ static void flush_io_q(struct z_rdma_ep *rep)
 	while (!TAILQ_EMPTY(&rep->io_q)) {
 		ctxt = TAILQ_FIRST(&rep->io_q);
 		TAILQ_REMOVE(&rep->io_q, ctxt, pending_link);
+		if (rep->ep.thread)
+			__atomic_fetch_sub(&rep->ep.thread->stat->sq_sz, 1, __ATOMIC_SEQ_CST);
+		__atomic_fetch_sub(&rep->ep.sq_sz, 1, __ATOMIC_SEQ_CST);
 		ctxt->is_pending = 0;
 		switch (ctxt->op) {
 		case IBV_WC_SEND:
@@ -947,6 +953,9 @@ static void submit_pending(struct z_rdma_ep *rep)
 			goto out;
 
 		TAILQ_REMOVE(&rep->io_q, ctxt, pending_link);
+		__atomic_fetch_sub(&rep->ep.sq_sz, 1, __ATOMIC_SEQ_CST);
+		if (rep->ep.thread)
+			__atomic_fetch_sub(&rep->ep.thread->stat->sq_sz, 1, __ATOMIC_SEQ_CST);
 		ctxt->is_pending = 0;
 
 		rc = post_send(rep, ctxt, &badwr, is_rdma);

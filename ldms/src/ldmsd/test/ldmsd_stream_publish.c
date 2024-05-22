@@ -32,6 +32,7 @@ static struct option long_opts[] = {
 	{0,          0,                 0,  0 }
 };
 
+void usage(int argc, char **argv) __attribute__((noreturn));
 void usage(int argc, char **argv)
 {
 	printf("usage: %s -x <xprt> -h <host> -p <port> "
@@ -188,10 +189,15 @@ int main(int argc, char **argv)
 		repeat = 1;
 
 	int rc;
-	ldms_t ldms;
+	ldms_t ldms = NULL;
 	if (stream_new || line_mode) {
 		/* Create a transport endpoint */
 		ldms = ldms_xprt_new_with_auth(xprt, NULL, auth, NULL);
+		if (!ldms) {
+			rc = errno;
+			printf("Failed to create the LDMS transport endpoint.\n");
+			return rc;
+		}
 		rc = ldms_xprt_connect_by_name(ldms, host, port, NULL, NULL);
 		if (rc){
 			printf("Error %d connecting to peer\n", rc);
